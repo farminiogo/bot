@@ -21,7 +21,7 @@ const Sidebar = memo(({ className }: SidebarProps) => {
 
   return (
     <aside className={cn(
-      "w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex-shrink-0",
+      "bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex-shrink-0",
       className
     )}>
       <div className="h-full px-3 py-4 flex flex-col">

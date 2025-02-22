@@ -1,9 +1,8 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, Activity, AlertTriangle, RefreshCw, PlayCircle, Square, Settings } from 'lucide-react';
 import { usePriceData } from '../hooks/usePriceData';
 import { tradingBot } from '../services/tradingBot';
-import { getTokenByContract, type TokenData } from '../services/coingecko';
 
 interface Token {
   name: string;
@@ -58,7 +57,6 @@ const formatNumber = (num: number): string => {
 
 function Dashboard() {
   const [historicalData, setHistoricalData] = useState<any[]>([]);
-  const [tokenData, setTokenData] = useState<{[key: string]: TokenData}>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isBotEnabled, setIsBotEnabled] = useState(false);
@@ -93,48 +91,6 @@ function Dashboard() {
     setIsBotEnabled(false);
   };
 
-  const fetchTokenData = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      const tokenDataMap = TOKENS.reduce((acc, token) => {
-        const priceData = priceDataMap[token.symbol];
-        acc[token.symbol] = {
-          id: token.coingeckoId,
-          symbol: token.baseSymbol,
-          name: token.name,
-          image: { thumb: '', small: '', large: '' },
-          market_data: {
-            current_price: { usd: priceData?.price || 0 },
-            market_cap: { usd: token.marketCap },
-            total_volume: { usd: priceData ? priceData.volume * priceData.price : 0 },
-            price_change_percentage_24h: priceData?.priceChangePercent || 0,
-            total_supply: 0,
-            circulating_supply: 0,
-            max_supply: null,
-            fully_diluted_valuation: { usd: 0 }
-          },
-          description: { en: '' }
-        };
-        return acc;
-      }, {} as {[key: string]: TokenData});
-      
-      setTokenData(tokenDataMap);
-    } catch (error) {
-      setError('Failed to fetch token data. Please try again later.');
-      console.error('Error fetching token data:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, [btcPrice, ethPrice, bnbPrice]);
-
-  useEffect(() => {
-    fetchTokenData();
-    const interval = setInterval(fetchTokenData, 60000);
-    return () => clearInterval(interval);
-  }, [fetchTokenData]);
-
   useEffect(() => {
     const updateHistoricalData = () => {
       const timestamp = new Date().toLocaleTimeString();
@@ -165,7 +121,7 @@ function Dashboard() {
           </div>
         </div>
         <button
-          onClick={fetchTokenData}
+          onClick={() => setError(null)}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
         >
           <RefreshCw className="w-4 h-4" />
@@ -340,7 +296,7 @@ function Dashboard() {
             <LineChart data={historicalData}>
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="time" />
-              <YAxis />
+              <YAxis domain={['auto', 'auto']} />
               <Tooltip />
               {sortedTokens.map((token, index) => (
                 <Line
@@ -349,6 +305,7 @@ function Dashboard() {
                   dataKey={token.symbol}
                   name={token.name}
                   stroke={CHART_COLORS[index]}
+                  dot={false}
                 />
               ))}
             </LineChart>

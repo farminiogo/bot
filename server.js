@@ -1,32 +1,41 @@
-import express from "express";
-import { exec } from "child_process";
+import { exec } from 'child_process';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
-// تشغيل بوت التيلجرام تلقائيًا
-exec("node src/services/telegramBot.js", (error, stdout, stderr) => {
-  if (error) {
-    console.error(`❌ Telegram Bot Error: ${error.message}`);
-    return;
+// Start Telegram bot with increased memory limit
+exec('node --max-old-space-size=4096 src/services/telegramBot.js', 
+  { 
+    maxBuffer: 1024 * 1024 * 10,
+    cwd: __dirname
+  }, 
+  (err, stdout, stderr) => {
+    if (err) {
+      console.error('Bot Execution Error:', err);
+      return;
+    }
+    if (stderr) {
+      console.error('Bot STDERR:', stderr);
+    }
+    console.log(stdout);
   }
-  if (stderr) console.error(`⚠️ Telegram Bot Warning: ${stderr}`);
-  console.log(`✅ Telegram Bot Running: ${stdout}`);
+);
+
+// Keep the process alive
+process.stdin.resume();
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  console.log('Shutting down...');
+  process.exit(0);
 });
 
-// تشغيل Vite لخدمة الموقع
-exec("vite", (error, stdout, stderr) => {
-  if (error) {
-    console.error(`❌ Vite Server Error: ${error.message}`);
-    return;
-  }
-  if (stderr) console.error(`⚠️ Vite Server Warning: ${stderr}`);
-  console.log(`✅ Vite Server Running: ${stdout}`);
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
 });
 
-// رسالة عند فتح الموقع
-app.get("/", (req, res) => {
-  res.send("✅ Crypto Analytics Platform is running!");
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
-
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

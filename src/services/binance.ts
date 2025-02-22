@@ -1,6 +1,6 @@
 import type { PriceData } from './types';
 
-// Enhanced logging utility with Arabic support
+// Enhanced logging utility with English messages
 class Logger {
   static info(message: string, ...args: any[]) {
     console.log(`ℹ️ [${new Date().toISOString()}]: ${message}`, ...args);
@@ -26,117 +26,198 @@ class BinanceWebSocket {
   private lastMessageTime = Date.now();
   private heartbeatInterval: number | null = null;
   private connectionCheckInterval: number | null = null;
-  private priceThreshold = 0.001;
-  private cacheTimeout = 5000;
-  private pendingSubscriptions: Set<string> = new Set();
-  private callbacks: Map<string, Set<(data: PriceData) => void>> = new Map();
-  private connectionTimeout: number = 15000;
-  private pingInterval: number = 10000;
-  private pongTimeout: number = 8000;
-  private lastPongTime: number = Date.now();
-  private backoffMultiplier: number = 1.5;
-  private maxBackoffDelay: number = 45000;
-  private initialDataFetched: boolean = false;
+  private lastPongTime = Date.now();
+  private backoffMultiplier = 1.5;
+  private maxBackoffDelay = 45000;
+  private isInitialized = false;
+  private isOnline = true;
+  private pendingSubscriptions = new Set<string>();
+  private callbacks = new Map<string, Set<(data: PriceData) => void>>();
+  private connectionTimeout = 15000;
+  private pingInterval = 10000;
+  private pongTimeout = 8000;
+  private defaultSymbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT'];
+  private retryQueue: (() => void)[] = [];
+  private maxQueueSize = 50;
 
   constructor() {
     this.initializeConnection();
+    this.setupNetworkListeners();
+  }
+
+  private setupNetworkListeners() {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => {
+        this.isOnline = true;
+        Logger.info('Network connection restored');
+        this.reconnectAttempts = 0;
+        this.processRetryQueue();
+        this.connect();
+      });
+
+      window.addEventListener('offline', () => {
+        this.isOnline = false;
+        Logger.warn('Network connection lost');
+        this.cleanup(false);
+      });
+
+      window.addEventListener('focus', () => {
+        if (this.isOnline) {
+          this.verifyConnection();
+        }
+      });
+    }
+  }
+
+  private verifyConnection() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.connect();
+    } else {
+      this.ping();
+    }
   }
 
   private async initializeConnection() {
     try {
-      // Fetch initial market data via REST API
-      await this.fetchInitialData();
+      // Initialize with default data
+      this.initializeDefaultData();
+      
+      if (this.isOnline) {
+        // Try to fetch real data
+        await this.fetchInitialData();
+      }
+      
+      // Setup connection
       this.connect();
       this.startConnectionCheck();
-      window.addEventListener('online', () => this.handleOnline());
-      window.addEventListener('offline', () => this.handleOffline());
+      
+      this.isInitialized = true;
     } catch (error) {
-      Logger.error('خطأ في التهيئة الأولية:', error);
-      setTimeout(() => this.initializeConnection(), 5000);
+      Logger.warn('Failed to load initial data, using default data');
     }
   }
 
+  private initializeDefaultData() {
+    const now = Date.now();
+    this.defaultSymbols.forEach(symbol => {
+      const defaultData: PriceData = {
+        symbol,
+        price: 0,
+        priceChange: 0,
+        priceChangePercent: 0,
+        volume: 0,
+        high24h: 0,
+        low24h: 0,
+        lastUpdate: now
+      };
+
+      this.lastData.set(symbol, {
+        data: defaultData,
+        timestamp: now
+      });
+    });
+  }
+
   private async fetchInitialData() {
+    if (!this.isOnline) {
+      throw new Error('No network connection');
+    }
+
     try {
-      const response = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+      const response = await fetch('https://api.binance.com/api/v3/ticker/24hr', {
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
       const data = await response.json();
       
       data.forEach((ticker: any) => {
+        if (!ticker || typeof ticker.symbol !== 'string') return;
+
         const priceData: PriceData = {
           symbol: ticker.symbol,
-          price: parseFloat(ticker.lastPrice),
-          priceChange: parseFloat(ticker.priceChange),
-          priceChangePercent: parseFloat(ticker.priceChangePercent),
-          volume: parseFloat(ticker.volume),
-          high24h: parseFloat(ticker.highPrice),
-          low24h: parseFloat(ticker.lowPrice),
+          price: parseFloat(ticker.lastPrice) || 0,
+          priceChange: parseFloat(ticker.priceChange) || 0,
+          priceChangePercent: parseFloat(ticker.priceChangePercent) || 0,
+          volume: parseFloat(ticker.volume) || 0,
+          high24h: parseFloat(ticker.highPrice) || 0,
+          low24h: parseFloat(ticker.lowPrice) || 0,
           lastUpdate: Date.now()
         };
 
-        this.lastData.set(ticker.symbol, {
-          data: priceData,
-          timestamp: Date.now()
-        });
+        if (!Object.values(priceData).some(val => isNaN(val as number))) {
+          this.lastData.set(ticker.symbol, {
+            data: priceData,
+            timestamp: Date.now()
+          });
+        }
       });
 
-      this.initialDataFetched = true;
-      Logger.info('تم تحميل البيانات الأولية بنجاح');
+      Logger.info('Initial data loaded successfully');
     } catch (error) {
-      Logger.error('خطأ في تحميل البيانات الأولية:', error);
+      Logger.warn('Failed to load initial data, will retry later');
+      this.addToRetryQueue(() => this.fetchInitialData());
       throw error;
     }
   }
 
-  private handleOnline() {
-    Logger.info('اتصال الإنترنت متوفر، جاري إعادة الاتصال...');
-    this.reconnectAttempts = 0;
-    this.connect();
+  private addToRetryQueue(operation: () => void) {
+    if (this.retryQueue.length < this.maxQueueSize) {
+      this.retryQueue.push(operation);
+    }
   }
 
-  private handleOffline() {
-    Logger.warn('انقطع اتصال الإنترنت، في انتظار عودة الاتصال...');
-    this.cleanup();
-  }
-
-  private getExponentialBackoff(): number {
-    return Math.min(
-      this.baseReconnectDelay * Math.pow(this.backoffMultiplier, this.reconnectAttempts),
-      this.maxBackoffDelay
-    );
+  private processRetryQueue() {
+    while (this.retryQueue.length > 0 && this.isOnline) {
+      const operation = this.retryQueue.shift();
+      if (operation) {
+        try {
+          operation();
+        } catch (error) {
+          Logger.error('Error processing retry operation:', error);
+        }
+      }
+    }
   }
 
   private connect() {
-    if (this.isReconnecting) {
-      Logger.warn('محاولة اتصال جارية بالفعل');
+    if (this.isReconnecting || !this.isOnline) {
       return;
     }
 
     this.isReconnecting = true;
 
     try {
-      this.cleanup();
-      Logger.info('جاري الاتصال بخادم Binance...');
+      this.cleanup(false);
       
+      // Fix: Change URL format to use single stream with multiple symbols
       const streams = Array.from(this.subscriptionCounts.keys())
         .map(symbol => `${symbol.toLowerCase()}@ticker`);
       
-      const url = streams.length > 0
-        ? `wss://stream.binance.com:9443/ws/${streams.join('/')}`
-        : 'wss://stream.binance.com:9443/ws';
+      const url = `wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`;
 
       this.ws = new WebSocket(url);
+      this.ws.binaryType = 'blob';
 
       const connectionTimeoutId = setTimeout(() => {
         if (this.ws?.readyState !== WebSocket.OPEN) {
-          Logger.error('انتهت مهلة الاتصال');
-          this.ws?.close();
+          Logger.error('Connection timeout');
+          this.cleanup(true);
           this.handleReconnect();
         }
       }, this.connectionTimeout);
 
       this.setupWebSocketHandlers(connectionTimeoutId);
     } catch (error) {
-      Logger.error('خطأ في إنشاء اتصال WebSocket:', error);
+      Logger.error('Error creating WebSocket connection:', error);
       this.handleReconnect();
     }
   }
@@ -146,13 +227,14 @@ class BinanceWebSocket {
 
     this.ws.onopen = () => {
       clearTimeout(connectionTimeoutId);
-      Logger.info('تم الاتصال بنجاح');
+      Logger.info('Connected successfully');
       this.reconnectAttempts = 0;
       this.isReconnecting = false;
       this.lastMessageTime = Date.now();
       this.lastPongTime = Date.now();
       this.startHeartbeat();
       this.resubscribeAll();
+      this.processRetryQueue();
     };
 
     this.ws.onmessage = (event) => {
@@ -165,29 +247,126 @@ class BinanceWebSocket {
           return;
         }
 
-        if (Array.isArray(data)) {
-          data.forEach(ticker => this.processTicker(ticker));
-        } else if (data.data) {
+        // Fix: Handle stream data format
+        if (data.stream && data.data) {
           this.processTicker(data.data);
+        } else if (Array.isArray(data)) {
+          data.forEach(ticker => this.processTicker(ticker));
         } else if (data.e === '24hrTicker') {
           this.processTicker(data);
         }
       } catch (error) {
-        Logger.error('خطأ في معالجة رسالة WebSocket:', error);
+        Logger.error('Error processing WebSocket message:', error);
       }
     };
 
     this.ws.onerror = (error) => {
       clearTimeout(connectionTimeoutId);
-      Logger.error('خطأ في WebSocket:', error);
+      Logger.error('WebSocket error:', error);
       this.handleReconnect();
     };
 
-    this.ws.onclose = (event) => {
+    this.ws.onclose = () => {
       clearTimeout(connectionTimeoutId);
-      Logger.warn(`تم إغلاق اتصال WebSocket. Code: ${event.code}, Reason: ${event.reason}`);
       this.handleReconnect();
     };
+  }
+
+  private ping() {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ ping: Date.now() }));
+    }
+  }
+
+  private cleanup(reconnect = true) {
+    if (this.ws) {
+      try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
+        
+        if (this.ws.readyState === WebSocket.OPEN) {
+          this.ws.close();
+        }
+      } catch (e) {
+        Logger.warn('Error during cleanup:', e);
+      }
+      this.ws = null;
+    }
+
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+
+    if (reconnect) {
+      this.handleReconnect();
+    }
+  }
+
+  private startHeartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+    }
+
+    this.heartbeatInterval = window.setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ping();
+
+        setTimeout(() => {
+          if (Date.now() - this.lastPongTime > this.pongTimeout) {
+            Logger.warn('No pong received, reconnecting...');
+            this.cleanup(true);
+          }
+        }, this.pongTimeout);
+      }
+    }, this.pingInterval);
+  }
+
+  private startConnectionCheck() {
+    if (this.connectionCheckInterval) {
+      clearInterval(this.connectionCheckInterval);
+    }
+
+    this.connectionCheckInterval = window.setInterval(() => {
+      const now = Date.now();
+      if (now - this.lastMessageTime > 60000 && !this.isReconnecting && this.isOnline) {
+        Logger.warn('No data received for 1 minute, reconnecting...');
+        this.connect();
+      }
+    }, 30000);
+  }
+
+  private handleReconnect() {
+    if (this.isReconnecting || !this.isOnline) return;
+
+    try {
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        this.reconnectAttempts++;
+        const delay = Math.min(
+          this.baseReconnectDelay * Math.pow(this.backoffMultiplier, this.reconnectAttempts),
+          this.maxBackoffDelay
+        );
+        
+        Logger.info(`Reconnection attempt ${this.reconnectAttempts} in ${delay}ms`);
+        
+        setTimeout(() => {
+          this.isReconnecting = false;
+          this.connect();
+        }, delay);
+      } else {
+        Logger.error('Maximum reconnection attempts reached');
+        setTimeout(() => {
+          this.reconnectAttempts = 0;
+          this.isReconnecting = false;
+          this.connect();
+        }, 60000);
+      }
+    } catch (error) {
+      Logger.error('Error during reconnection:', error);
+      this.isReconnecting = false;
+    }
   }
 
   private processTicker(ticker: any) {
@@ -205,115 +384,21 @@ class BinanceWebSocket {
     };
 
     if (priceData.price > 0) {
-      const lastCachedData = this.lastData.get(priceData.symbol);
+      this.lastData.set(ticker.s, {
+        data: priceData,
+        timestamp: Date.now()
+      });
 
-      if (!lastCachedData || 
-          this.shouldUpdatePrice(lastCachedData.data.price, priceData.price) ||
-          Date.now() - lastCachedData.timestamp > this.cacheTimeout) {
-        
-        this.lastData.set(priceData.symbol, {
-          data: priceData,
-          timestamp: Date.now()
-        });
-
-        const callbacks = this.callbacks.get(priceData.symbol);
-        if (callbacks) {
-          callbacks.forEach(callback => {
-            try {
-              callback(priceData);
-            } catch (error) {
-              Logger.error('Error in price update callback:', error);
-            }
-          });
-        }
-      }
-    }
-  }
-
-  private shouldUpdatePrice(oldPrice: number, newPrice: number): boolean {
-    return Math.abs((newPrice - oldPrice) / oldPrice) >= this.priceThreshold;
-  }
-
-  private cleanup() {
-    if (this.ws) {
-      try {
-        this.ws.onopen = null;
-        this.ws.onmessage = null;
-        this.ws.onerror = null;
-        this.ws.onclose = null;
-        
-        if (this.ws.readyState === WebSocket.OPEN) {
-          this.ws.close();
-        }
-      } catch (e) {
-        Logger.warn('Cleanup error:', e);
-      }
-      this.ws = null;
-    }
-
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-  }
-
-  private startHeartbeat() {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-    }
-
-    this.heartbeatInterval = window.setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        // Send ping
-        this.ws.send(JSON.stringify({ ping: Date.now() }));
-
-        // Check if we received pong
-        setTimeout(() => {
-          if (Date.now() - this.lastPongTime > this.pongTimeout) {
-            Logger.warn('No pong received, reconnecting...');
-            this.handleReconnect();
+      const callbacks = this.callbacks.get(ticker.s);
+      if (callbacks) {
+        callbacks.forEach(callback => {
+          try {
+            callback(priceData);
+          } catch (error) {
+            Logger.error('Error in price update callback:', error);
           }
-        }, this.pongTimeout);
+        });
       }
-    }, this.pingInterval);
-  }
-
-  private startConnectionCheck() {
-    if (this.connectionCheckInterval) {
-      clearInterval(this.connectionCheckInterval);
-    }
-
-    this.connectionCheckInterval = window.setInterval(() => {
-      const now = Date.now();
-      if (now - this.lastMessageTime > 60000 && !this.isReconnecting) {
-        Logger.warn('No messages received for 60 seconds, reconnecting...');
-        this.connect();
-      }
-    }, 30000);
-  }
-
-  private handleReconnect() {
-    if (this.isReconnecting) return;
-
-    try {
-      if (this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts++;
-        Logger.info(`Reconnecting... Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
-        
-        setTimeout(() => {
-          this.isReconnecting = false;
-          this.connect();
-        }, this.getExponentialBackoff());
-      } else {
-        Logger.error('Max reconnection attempts reached, resetting in 60 seconds');
-        setTimeout(() => {
-          this.reconnectAttempts = 0;
-          this.isReconnecting = false;
-          this.connect();
-        }, 60000);
-      }
-    } catch (error) {
-      Logger.error('Error during reconnection:', error);
     }
   }
 
@@ -323,6 +408,7 @@ class BinanceWebSocket {
         .map(symbol => `${symbol.toLowerCase()}@ticker`);
 
       if (streams.length > 0) {
+        // Fix: Use correct subscription format
         const subscribeMsg = {
           method: 'SUBSCRIBE',
           params: streams,
@@ -330,7 +416,7 @@ class BinanceWebSocket {
         };
 
         this.ws.send(JSON.stringify(subscribeMsg));
-        Logger.info('Resubscribed to streams:', streams);
+        Logger.info('Resubscribed to:', streams);
       }
     }
   }
@@ -339,21 +425,6 @@ class BinanceWebSocket {
     const count = this.subscriptionCounts.get(symbol) || 0;
     this.subscriptionCounts.set(symbol, count + 1);
 
-    if (count === 0) {
-      this.pendingSubscriptions.add(symbol);
-      
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        const subscribeMsg = {
-          method: 'SUBSCRIBE',
-          params: [`${symbol.toLowerCase()}@ticker`],
-          id: Date.now()
-        };
-        this.ws.send(JSON.stringify(subscribeMsg));
-      } else {
-        this.connect();
-      }
-    }
-
     let callbacks = this.callbacks.get(symbol);
     if (!callbacks) {
       callbacks = new Set();
@@ -361,43 +432,14 @@ class BinanceWebSocket {
     }
     callbacks.add(callback);
 
-    // Send initial data if available
+    if (count === 0) {
+      this.pendingSubscriptions.add(symbol);
+      this.connect();
+    }
+
     const lastData = this.lastData.get(symbol);
     if (lastData) {
       callback(lastData.data);
-    } else if (this.initialDataFetched) {
-      // If we have initial data but not for this symbol, fetch it specifically
-      this.fetchSymbolData(symbol).then(data => {
-        if (data) callback(data);
-      });
-    }
-  }
-
-  private async fetchSymbolData(symbol: string): Promise<PriceData | null> {
-    try {
-      const response = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
-      const ticker = await response.json();
-      
-      const priceData: PriceData = {
-        symbol: ticker.symbol,
-        price: parseFloat(ticker.lastPrice),
-        priceChange: parseFloat(ticker.priceChange),
-        priceChangePercent: parseFloat(ticker.priceChangePercent),
-        volume: parseFloat(ticker.volume),
-        high24h: parseFloat(ticker.highPrice),
-        low24h: parseFloat(ticker.lowPrice),
-        lastUpdate: Date.now()
-      };
-
-      this.lastData.set(symbol, {
-        data: priceData,
-        timestamp: Date.now()
-      });
-
-      return priceData;
-    } catch (error) {
-      Logger.error(`خطأ في تحميل بيانات ${symbol}:`, error);
-      return null;
     }
   }
 
@@ -432,34 +474,42 @@ class BinanceWebSocket {
 
   public getLastData(symbol: string): PriceData | null {
     const cachedData = this.lastData.get(symbol);
-    if (!cachedData) return null;
-
-    if (Date.now() - cachedData.timestamp > this.cacheTimeout) {
-      Logger.warn(`Cached data for ${symbol} is stale`);
-      return null;
+    if (!cachedData) {
+      return {
+        symbol,
+        price: 0,
+        priceChange: 0,
+        priceChangePercent: 0,
+        volume: 0,
+        high24h: 0,
+        low24h: 0,
+        lastUpdate: Date.now()
+      };
     }
-
     return cachedData.data;
   }
 
   public close() {
     Logger.info('Closing WebSocket connection');
-    this.cleanup();
+    this.cleanup(false);
+    
     if (this.connectionCheckInterval) {
       clearInterval(this.connectionCheckInterval);
       this.connectionCheckInterval = null;
     }
+    
     this.callbacks.clear();
     this.subscriptionCounts.clear();
     this.lastData.clear();
     this.pendingSubscriptions.clear();
+    this.retryQueue = [];
   }
 }
-
-// Singleton instance
-export const binanceWS = new BinanceWebSocket();
 
 interface CachedData {
   data: PriceData;
   timestamp: number;
 }
+
+// Singleton instance
+export const binanceWS = new BinanceWebSocket();
