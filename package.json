@@ -3,16 +3,18 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "lint:fix": "eslint . --ext ts,tsx --fix",
-    "format": "prettier --write \"src/**/*.{ts,tsx}\"",
-    "preview": "vite preview",
-    "monitor": "node --experimental-modules src/services/marketMonitor.js",
-    "bot": "node --experimental-modules src/services/telegramBot.js"
-  },
+"scripts": {
+  "start": "node server.js",
+  "dev": "vite",
+  "build": "vite build",
+  "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+  "lint:fix": "eslint . --ext ts,tsx --fix",
+  "format": "prettier --write \"src/**/*.{ts,tsx}\"",
+  "preview": "vite preview",
+  "monitor": "node src/services/marketMonitor.js",
+  "bot": "node src/services/telegramBot.js"
+}
+
   "dependencies": {
     "@tanstack/react-query": "^5.28.4",
     "@tensorflow/tfjs": "^4.17.0",
