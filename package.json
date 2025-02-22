@@ -1,6 +1,13 @@
 {
   "name": "crypto-analytics-platform",
   "version": "1.0.0",
+  "type": "module",
+  "dependencies": { ... }
+}
+{
+
+  "name": "crypto-analytics-platform",
+  "version": "1.0.0",
   "dependencies": {
     "express": "^4.17.1",
     "dotenv": "^16.4.7",
