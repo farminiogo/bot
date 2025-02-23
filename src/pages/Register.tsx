@@ -8,16 +8,18 @@ export default function Register() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
-  const { signUp, error } = useAuth();
+  const [errorMessage, setErrorMessage] = useState('');
+  const { signUp } = useAuth();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMessage(''); // Clear previous errors
     try {
       setLoading(true);
       await signUp(email, password);
       setSuccess(true);
-    } catch (error) {
-      console.error('Registration error:', error);
+    } catch (error: any) {
+      setErrorMessage(error.message || 'حدث خطأ أثناء التسجيل');
     } finally {
       setLoading(false);
     }
@@ -63,11 +65,11 @@ export default function Register() {
           </p>
         </div>
 
-        {error && (
+        {errorMessage && (
           <div className="bg-red-50 dark:bg-red-900/50 p-4 rounded-lg">
             <div className="flex items-center gap-2 text-red-700 dark:text-red-200">
               <AlertTriangle className="w-5 h-5" />
-              <p>{error}</p>
+              <p>{errorMessage}</p>
             </div>
           </div>
         )}
@@ -75,10 +77,7 @@ export default function Register() {
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
-              <label
-                htmlFor="email"
-                className="block text-sm font-medium text-gray-700 dark:text-gray-300"
-              >
+              <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
                 البريد الإلكتروني
               </label>
               <input
@@ -92,10 +91,7 @@ export default function Register() {
               />
             </div>
             <div>
-              <label
-                htmlFor="password"
-                className="block text-sm font-medium text-gray-700 dark:text-gray-300"
-              >
+              <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
                 كلمة المرور
               </label>
               <input

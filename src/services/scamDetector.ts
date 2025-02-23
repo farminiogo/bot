@@ -1,398 +1,206 @@
 import axios from 'axios';
-import { getTokenByContract } from './coingecko';
+import * as tf from '@tensorflow/tfjs';
+import { ethers } from 'ethers';
+import { getTokenData } from './coingecko';
+import { getContractInfo } from './etherscan';
 
-const ETHERSCAN_API_KEY = 'YOUR_ETHERSCAN_API_KEY';
-const ETHERSCAN_API = 'https://api.etherscan.io/api';
-const MAX_RETRIES = 3;
-const INITIAL_DELAY = 1000;
+// قائمة المواقع المشبوهة التي يتم تحديثها بانتظام
+const BLACKLISTED_SITES = [
+  'scam-token.io', 'fake-airdrop.com', 'phishing-wallet.com'
+];
 
-export interface SecurityCheck {
-  id: string;
-  name: string;
-  status: 'safe' | 'warning' | 'danger' | 'info';
-  description: string;
-  details?: string;
-  color?: string; // For UI color-coding
+// تصنيف المخاطر المحتملة
+type ScamRiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
+interface ScamDetectionResult {
+  riskLevel: ScamRiskLevel;
+  reasons: string[];
+  confidence: number;
+  contractInfo?: any;
 }
 
-export interface SecurityScore {
-  score: number;
-  maxScore: number;
-  riskLevel: 'low' | 'medium' | 'high';
-}
+// **🔹 تحميل أو تدريب نموذج الذكاء الاصطناعي**
+let scamModel: tf.LayersModel | null = null;
 
-interface ContractData {
-  isVerified: boolean;
-  sourceCode?: string;
-  contractCreator?: string;
-  implementation?: string;
-  deploymentDate?: number;
-  isProxy?: boolean;
-}
-
-// Enhanced error handling utility
-class SecurityError extends Error {
-  constructor(message: string, public details?: any) {
-    super(message);
-    this.name = 'SecurityError';
-  }
-}
-
-// Exponential backoff retry utility
-async function fetchWithRetry<T>(
-  fn: () => Promise<T>,
-  retries: number = MAX_RETRIES
-): Promise<T> {
-  let lastError: Error | null = null;
-  
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fn();
-    } catch (error: any) {
-      lastError = error;
-      
-      if (error.response?.status === 429) {
-        const retryAfter = parseInt(error.response.headers['retry-after'] || '60');
-        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
-        continue;
-      }
-
-      const delay = INITIAL_DELAY * Math.pow(2, i);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-
-  throw lastError || new Error('Failed after multiple retries');
-}
-
-async function getContractData(address: string): Promise<ContractData> {
+async function loadScamDetectionModel(): Promise<void> {
   try {
-    const response = await fetchWithRetry(() => 
-      axios.get(ETHERSCAN_API, {
-        params: {
-          module: 'contract',
-          action: 'getsourcecode',
-          address,
-          apikey: ETHERSCAN_API_KEY
-        }
-      })
-    );
+    scamModel = await tf.loadLayersModel('https://your-model-url/model.json');
+    console.log('✅ تم تحميل نموذج الكشف عن الاحتيال بنجاح');
+  } catch (error) {
+    console.error('❌ خطأ في تحميل نموذج الذكاء الاصطناعي:', error);
+  }
+}
 
-    const data = response.data.result[0];
-    const deploymentTx = await fetchWithRetry(() =>
-      axios.get(ETHERSCAN_API, {
-        params: {
-          module: 'account',
-          action: 'txlist',
-          address,
-          page: 1,
-          offset: 1,
-          sort: 'asc',
-          apikey: ETHERSCAN_API_KEY
-        }
-      })
-    );
+// **🔹 تحليل بيانات العقد الذكي**
+async function analyzeSmartContract(address: string): Promise<ScamDetectionResult> {
+  try {
+    const contractInfo = await getContractInfo(address);
+    if (!contractInfo) {
+      return { riskLevel: 'high', reasons: ['❗ لم يتم العثور على معلومات العقد'], confidence: 0.8 };
+    }
+
+    const { isVerified, creatorAddress, txCount, isProxy, hasSuspiciousActivity } = contractInfo;
+
+    let riskScore = 0;
+    let reasons: string[] = [];
+
+    if (!isVerified) {
+      riskScore += 3;
+      reasons.push('❗ العقد غير موثق.');
+    }
+    if (isProxy) {
+      riskScore += 2;
+      reasons.push('⚠️ العقد يحتوي على بروكسي قد يغير السلوك.');
+    }
+    if (hasSuspiciousActivity) {
+      riskScore += 3;
+      reasons.push('🚨 تم اكتشاف نشاط مريب على العقد.');
+    }
+    if (txCount < 10) {
+      riskScore += 2;
+      reasons.push('⚠️ عدد المعاملات قليل جداً.');
+    }
+
+    const riskLevel: ScamRiskLevel =
+      riskScore >= 6 ? 'critical' :
+      riskScore >= 4 ? 'high' :
+      riskScore >= 2 ? 'medium' :
+      'low';
 
     return {
-      isVerified: data.ABI !== 'Contract source code not verified',
-      sourceCode: data.SourceCode,
-      contractCreator: data.ContractCreator,
-      implementation: data.Implementation,
-      deploymentDate: deploymentTx.data.result[0]?.timeStamp,
-      isProxy: data.Proxy === '1'
+      riskLevel,
+      reasons,
+      confidence: Math.min(1, riskScore / 6),
+      contractInfo
     };
   } catch (error) {
-    console.error('Error fetching contract data:', error);
-    return {
-      isVerified: false,
-      deploymentDate: 0,
-      isProxy: false
-    };
+    console.error('❌ خطأ في تحليل العقد الذكي:', error);
+    return { riskLevel: 'high', reasons: ['❗ فشل تحليل العقد'], confidence: 0.7 };
   }
 }
 
-function analyzeSourceCode(sourceCode: string): {
-  hasTransferRestrictions: boolean;
-  hasFeeOnTransfer: boolean;
-  hasBlacklist: boolean;
-  hasOwnerOnlyFunctions: boolean;
-  hasProxyImplementation: boolean;
-  isMintable: boolean;
-  hasRenounced: boolean;
-  hasAntiBot: boolean;
-  hasEmergencyFunctions: boolean;
-} {
-  // Enhanced regex patterns for better detection
-  const patterns = {
-    transferRestrictions: /require\s*\([^)]*transfer|assert\s*\([^)]*transfer/i,
-    feeOnTransfer: /(\b|_)fee\b|\btax\b|\bcommission\b/i,
-    blacklist: /\b(black|block)list\b/i,
-    ownerOnly: /\bonlyOwner\b|\brequire\s*\([^)]*msg\.sender\s*==\s*owner\b/i,
-    proxyImpl: /\bdelegatecall\b|\bupgradeable\b|\bproxy\b/i,
-    mintable: /\bmint\b(?!.*\bburn\b)|\bcreateTok(en|ens)\b/i,
-    renounceOwnership: /\brenounceOwnership\b|\btransferOwnership\s*\([^)]*address\s*\(\s*0\s*\)/i,
-    antiBot: /\bantiBot\b|\bbot\s*Prevention\b/i,
-    emergencyFunctions: /\bemergency\b|\bpause\b|\bfreeze\b/i
-  };
+// **🔹 تحليل التوكن عبر CoinGecko**
+async function analyzeToken(tokenSymbol: string): Promise<ScamDetectionResult> {
+  try {
+    const tokenData = await getTokenData(tokenSymbol);
+    if (!tokenData) {
+      return { riskLevel: 'high', reasons: ['❗ لم يتم العثور على بيانات التوكن'], confidence: 0.8 };
+    }
+
+    const { marketCap, liquidity, communityScore } = tokenData;
+    let riskScore = 0;
+    let reasons: string[] = [];
+
+    if (marketCap < 100000) {
+      riskScore += 3;
+      reasons.push('⚠️ القيمة السوقية منخفضة.');
+    }
+    if (liquidity < 50000) {
+      riskScore += 2;
+      reasons.push('⚠️ السيولة ضعيفة.');
+    }
+    if (communityScore < 2) {
+      riskScore += 2;
+      reasons.push('❗ دعم المجتمع للتوكن منخفض.');
+    }
+
+    const riskLevel: ScamRiskLevel =
+      riskScore >= 5 ? 'critical' :
+      riskScore >= 3 ? 'high' :
+      riskScore >= 1 ? 'medium' :
+      'low';
+
+    return {
+      riskLevel,
+      reasons,
+      confidence: Math.min(1, riskScore / 5)
+    };
+  } catch (error) {
+    console.error('❌ خطأ في تحليل التوكن:', error);
+    return { riskLevel: 'high', reasons: ['❗ فشل تحليل التوكن'], confidence: 0.7 };
+  }
+}
+
+// **🔹 فحص روابط المواقع المشبوهة**
+function checkBlacklistedDomains(url: string): ScamDetectionResult {
+  const isBlacklisted = BLACKLISTED_SITES.some(domain => url.includes(domain));
+
+  if (isBlacklisted) {
+    return {
+      riskLevel: 'critical',
+      reasons: ['🚨 الموقع مدرج ضمن القائمة السوداء.'],
+      confidence: 1.0
+    };
+  }
 
   return {
-    hasTransferRestrictions: patterns.transferRestrictions.test(sourceCode),
-    hasFeeOnTransfer: patterns.feeOnTransfer.test(sourceCode),
-    hasBlacklist: patterns.blacklist.test(sourceCode),
-    hasOwnerOnlyFunctions: patterns.ownerOnly.test(sourceCode),
-    hasProxyImplementation: patterns.proxyImpl.test(sourceCode),
-    isMintable: patterns.mintable.test(sourceCode),
-    hasRenounced: patterns.renounceOwnership.test(sourceCode),
-    hasAntiBot: patterns.antiBot.test(sourceCode),
-    hasEmergencyFunctions: patterns.emergencyFunctions.test(sourceCode)
+    riskLevel: 'low',
+    reasons: ['✅ الموقع يبدو آمناً.'],
+    confidence: 0.9
   };
 }
 
-function calculateLiquidityScore(liquidityUSD: number): number {
-  if (liquidityUSD >= 1000000) return 25; // $1M or more
-  if (liquidityUSD >= 500000) return 20;
-  if (liquidityUSD >= 100000) return 15;
-  if (liquidityUSD >= 50000) return 10;
-  if (liquidityUSD >= 10000) return 5;
-  return 0;
-}
-
-function calculateHolderScore(holders: number): number {
-  if (holders >= 1000) return 15;
-  if (holders >= 500) return 12;
-  if (holders >= 100) return 8;
-  if (holders >= 50) return 4;
-  return 0;
-}
-
-function calculateAgeScore(deploymentDate: number): number {
-  const ageInDays = (Date.now() / 1000 - deploymentDate) / 86400;
-  if (ageInDays >= 365) return 20; // 1 year or more
-  if (ageInDays >= 180) return 15; // 6 months
-  if (ageInDays >= 90) return 10;  // 3 months
-  if (ageInDays >= 30) return 5;   // 1 month
-  return 0;
-}
-
-export async function analyzeToken(contractAddress: string): Promise<{
-  checks: SecurityCheck[];
-  score: SecurityScore;
-}> {
-  try {
-    const [tokenData, contractData] = await Promise.all([
-      getTokenByContract(contractAddress),
-      getContractData(contractAddress)
-    ]);
-
-    const checks: SecurityCheck[] = [];
-    let totalScore = 0;
-    const maxScore = 120; // Increased max score for more granular risk assessment
-
-    // Contract Verification Check
-    checks.push({
-      id: 'verification',
-      name: 'Contract Verification',
-      status: contractData.isVerified ? 'safe' : 'danger',
-      description: contractData.isVerified
-        ? 'Smart contract is verified and publicly available'
-        : 'Contract is not verified - high risk',
-      details: contractData.isVerified
-        ? 'Verified contracts allow for code inspection and security analysis'
-        : 'Unverified contracts may hide malicious code',
-      color: contractData.isVerified ? 'green' : 'red'
-    });
-    totalScore += contractData.isVerified ? 30 : 0;
-
-    // Contract Age Check
-    if (contractData.deploymentDate) {
-      const ageScore = calculateAgeScore(contractData.deploymentDate);
-      const ageInDays = (Date.now() / 1000 - contractData.deploymentDate) / 86400;
-      
-      checks.push({
-        id: 'contract-age',
-        name: 'Contract Age',
-        status: ageScore >= 15 ? 'safe' : ageScore >= 5 ? 'warning' : 'danger',
-        description: `Contract deployed ${Math.floor(ageInDays)} days ago`,
-        details: `Older contracts tend to be more reliable and tested`,
-        color: ageScore >= 15 ? 'green' : ageScore >= 5 ? 'yellow' : 'red'
-      });
-      
-      totalScore += ageScore;
-    }
-
-    // Source Code Analysis
-    if (contractData.isVerified && contractData.sourceCode) {
-      const codeAnalysis = analyzeSourceCode(contractData.sourceCode);
-      
-      // Transfer Restrictions
-      if (codeAnalysis.hasTransferRestrictions) {
-        checks.push({
-          id: 'transfer-restrictions',
-          name: 'Transfer Restrictions',
-          status: 'warning',
-          description: 'Contract includes transfer restrictions',
-          details: 'May limit ability to sell tokens',
-          color: 'yellow'
-        });
-        totalScore -= 10;
-      }
-
-      // Fee on Transfer
-      if (codeAnalysis.hasFeeOnTransfer) {
-        checks.push({
-          id: 'transfer-fee',
-          name: 'Transfer Fee',
-          status: 'warning',
-          description: 'Contract implements transfer fees',
-          details: 'Additional costs when trading the token',
-          color: 'yellow'
-        });
-        totalScore -= 5;
-      }
-
-      // Blacklist Function
-      if (codeAnalysis.hasBlacklist) {
-        checks.push({
-          id: 'blacklist',
-          name: 'Blacklist Function',
-          status: 'danger',
-          description: 'Contract includes blacklist functionality',
-          details: 'Owner can restrict trading for specific addresses',
-          color: 'red'
-        });
-        totalScore -= 15;
-      }
-
-      // Owner Privileges
-      if (codeAnalysis.hasOwnerOnlyFunctions) {
-        const hasRenounced = codeAnalysis.hasRenounced;
-        checks.push({
-          id: 'owner-functions',
-          name: 'Owner Privileges',
-          status: hasRenounced ? 'info' : 'warning',
-          description: hasRenounced 
-            ? 'Owner privileges have been renounced'
-            : 'Contract has owner-only functions',
-          details: hasRenounced
-            ? 'Contract ownership has been renounced, reducing centralization risks'
-            : 'Owner has special privileges that could affect token behavior',
-          color: hasRenounced ? 'blue' : 'yellow'
-        });
-        totalScore -= hasRenounced ? 0 : 10;
-      }
-
-      // Mintable Token
-      if (codeAnalysis.isMintable) {
-        checks.push({
-          id: 'mintable',
-          name: 'Mintable Token',
-          status: 'warning',
-          description: 'Contract allows minting new tokens',
-          details: 'Supply can be increased, potential inflation risk',
-          color: 'yellow'
-        });
-        totalScore -= 10;
-      }
-
-      // Emergency Functions
-      if (codeAnalysis.hasEmergencyFunctions) {
-        checks.push({
-          id: 'emergency-functions',
-          name: 'Emergency Functions',
-          status: 'warning',
-          description: 'Contract includes emergency functions',
-          details: 'Owner can pause or freeze token transfers',
-          color: 'yellow'
-        });
-        totalScore -= 8;
-      }
-
-      // Proxy Implementation
-      if (codeAnalysis.hasProxyImplementation || contractData.isProxy) {
-        checks.push({
-          id: 'proxy',
-          name: 'Upgradeable Contract',
-          status: 'warning',
-          description: 'Contract logic can be upgraded',
-          details: 'Contract functionality can be changed by the owner',
-          color: 'yellow'
-        });
-        totalScore -= 5;
-      }
-    }
-
-    // Market Data Analysis
-    if (tokenData) {
-      // Liquidity Analysis
-      const liquidityScore = calculateLiquidityScore(tokenData.market_data.total_volume.usd);
-      checks.push({
-        id: 'liquidity',
-        name: 'Liquidity',
-        status: liquidityScore >= 20 ? 'safe' : liquidityScore >= 10 ? 'warning' : 'danger',
-        description: `${liquidityScore >= 20 ? 'Healthy' : liquidityScore >= 10 ? 'Moderate' : 'Low'} liquidity`,
-        details: `$${(tokenData.market_data.total_volume.usd / 1e6).toFixed(2)}M 24h trading volume`,
-        color: liquidityScore >= 20 ? 'green' : liquidityScore >= 10 ? 'yellow' : 'red'
-      });
-      totalScore += liquidityScore;
-
-      // Market Cap Analysis
-      const marketCap = tokenData.market_data.market_cap.usd;
-      if (marketCap > 1e6) {
-        checks.push({
-          id: 'market-cap',
-          name: 'Market Capitalization',
-          status: marketCap > 10e6 ? 'safe' : 'warning',
-          description: `Market cap: $${(marketCap / 1e6).toFixed(2)}M`,
-          details: 'Higher market cap generally indicates more stability',
-          color: marketCap > 10e6 ? 'green' : 'yellow'
-        });
-        totalScore += marketCap > 10e6 ? 15 : 5;
-      }
-
-      // Price Change Analysis
-      const priceChange = tokenData.market_data.price_change_percentage_24h;
-      if (Math.abs(priceChange) > 20) {
-        checks.push({
-          id: 'price-volatility',
-          name: 'Price Volatility',
-          status: 'warning',
-          description: `High price volatility: ${priceChange.toFixed(2)}% in 24h`,
-          details: 'Extreme price movements may indicate manipulation',
-          color: 'yellow'
-        });
-        totalScore -= 10;
-      }
-    }
-
-    // Normalize score
-    totalScore = Math.max(0, Math.min(totalScore, maxScore));
-    
-    // Calculate risk level based on normalized score
-    const normalizedScore = (totalScore / maxScore) * 100;
-    const riskLevel: SecurityScore['riskLevel'] = 
-      normalizedScore >= 70 ? 'low' : 
-      normalizedScore >= 40 ? 'medium' : 
-      'high';
-
-    return {
-      checks,
-      score: {
-        score: Math.round(normalizedScore),
-        maxScore: 100,
-        riskLevel
-      }
-    };
-  } catch (error) {
-    console.error('Error analyzing token security:', error);
-    
-    // Return safe fallback data instead of throwing
-    return {
-      checks: [],
-      score: {
-        score: 0,
-        maxScore: 100,
-        riskLevel: 'high'
-      }
-    };
+// **🔹 تحليل الأنماط المالية المشبوهة**
+async function analyzeFinancialPatterns(data: number[]): Promise<ScamDetectionResult> {
+  if (!scamModel) {
+    return { riskLevel: 'medium', reasons: ['⚠️ لم يتم تحميل نموذج الذكاء الاصطناعي.'], confidence: 0.5 };
   }
+
+  const inputTensor = tf.tensor2d([data], [1, data.length]);
+  const prediction = scamModel.predict(inputTensor) as tf.Tensor;
+  const riskScore = (await prediction.data())[0];
+
+  inputTensor.dispose();
+
+  const riskLevel: ScamRiskLevel =
+    riskScore > 0.75 ? 'critical' :
+    riskScore > 0.5 ? 'high' :
+    riskScore > 0.3 ? 'medium' :
+    'low';
+
+  return {
+    riskLevel,
+    reasons: [`🔍 التحليل يشير إلى ${riskLevel} مستوى مخاطر.`],
+    confidence: riskScore
+  };
 }
+
+// **🔹 دالة رئيسية للتحقق من عملية الاحتيال**
+async function detectScam({
+  address,
+  tokenSymbol,
+  websiteURL,
+  financialData
+}: {
+  address?: string;
+  tokenSymbol?: string;
+  websiteURL?: string;
+  financialData?: number[];
+}): Promise<ScamDetectionResult> {
+  const results: ScamDetectionResult[] = [];
+
+  if (address) {
+    results.push(await analyzeSmartContract(address));
+  }
+  if (tokenSymbol) {
+    results.push(await analyzeToken(tokenSymbol));
+  }
+  if (websiteURL) {
+    results.push(checkBlacklistedDomains(websiteURL));
+  }
+  if (financialData) {
+    results.push(await analyzeFinancialPatterns(financialData));
+  }
+
+  // دمج النتائج لتحديد النتيجة النهائية
+  let finalRiskScore = results.reduce((sum, res) => sum + (res.confidence || 0), 0) / results.length;
+  let highestRisk = results.reduce((max, res) => (res.riskLevel === 'critical' ? 'critical' : max), 'low');
+
+  return {
+    riskLevel: highestRisk as ScamRiskLevel,
+    reasons: results.flatMap(res => res.reasons),
+    confidence: finalRiskScore
+  };
+}
+
+export { detectScam, loadScamDetectionModel };

@@ -1,14 +1,15 @@
 import { QueryClient } from '@tanstack/react-query';
 
-// Configure query client with optimal settings
-export const queryClient = new QueryClient({
+// إنشاء كائن QueryClient مع الإعدادات الافتراضية
+const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 30000, // 30 seconds
-      cacheTime: 300000, // 5 minutes
-      retry: 2,
-      refetchOnWindowFocus: false,
-      refetchOnMount: false,
+      staleTime: 5 * 60 * 1000, // تعيين وقت انتهاء صلاحية البيانات إلى 5 دقائق
+      cacheTime: 10 * 60 * 1000, // تعيين مدة الاحتفاظ بالبيانات إلى 10 دقائق
+      retry: 2, // عدد مرات إعادة المحاولة عند فشل الطلب
+      refetchOnWindowFocus: false, // تعطيل إعادة الجلب عند تنشيط النافذة
     },
   },
 });
+
+export default queryClient;

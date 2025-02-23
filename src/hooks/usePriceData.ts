@@ -1,42 +1,47 @@
-import { useState, useEffect, useRef } from 'react';
-import { binanceWS, type PriceData } from '../services/binance';
+import { useQuery } from '@tanstack/react-query';
 
-export function usePriceData(symbol: string) {
-  const [priceData, setPriceData] = useState<PriceData | null>(() => 
-    binanceWS.getLastData(symbol)
-  );
-  const lastPriceRef = useRef<number | null>(null);
-  const mountedRef = useRef(true);
-
-  useEffect(() => {
-    mountedRef.current = true;
-
-    if (!symbol) return;
-
-    const handlePriceUpdate = (data: PriceData) => {
-      if (mountedRef.current) {
-        // Only update if price has changed
-        if (data.price !== lastPriceRef.current) {
-          lastPriceRef.current = data.price;
-          setPriceData(data);
-        }
+// دالة لجلب بيانات الأسعار من API
+const fetchPriceData = async (symbol: string) => {
+  try {
+    const apiEndpoints = [
+      `https://api1.binance.com/api/v3/ticker/24hr?symbol=${symbol}`,
+      `https://api2.binance.com/api/v3/ticker/24hr?symbol=${symbol}`,
+      `https://api3.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
+    ];
+    
+    for (const endpoint of apiEndpoints) {
+      const response = await fetch(endpoint);
+      if (response.ok) {
+        const data = await response.json();
+        return {
+          symbol: data.symbol,
+          price: parseFloat(data.lastPrice),
+          priceChange: parseFloat(data.priceChange),
+          priceChangePercent: parseFloat(data.priceChangePercent),
+          volume: parseFloat(data.volume),
+          high24h: parseFloat(data.highPrice),
+          low24h: parseFloat(data.lowPrice),
+          lastUpdate: Date.now()
+        };
       }
-    };
-
-    // Get initial data
-    const initialData = binanceWS.getLastData(symbol);
-    if (initialData) {
-      lastPriceRef.current = initialData.price;
-      setPriceData(initialData);
     }
+    throw new Error('Failed to fetch price data from all endpoints');
+  } catch (error) {
+    console.error('Error fetching price data:', error);
+    throw error;
+  }
+};
 
-    binanceWS.subscribe(symbol, handlePriceUpdate);
-
-    return () => {
-      mountedRef.current = false;
-      binanceWS.unsubscribe(symbol, handlePriceUpdate);
-    };
-  }, [symbol]);
-
-  return priceData;
-}
+// هوك يستخدم React Query لجلب البيانات وتحديثها تلقائيًا
+export const usePriceData = (symbol: string) => {
+  return useQuery([
+    'priceData',
+    symbol
+  ], () => fetchPriceData(symbol), {
+    staleTime: 60000, // يجعل البيانات غير قديمة لمدة 60 ثانية لتجنب الطلبات المتكررة
+    cacheTime: 300000, // يحتفظ بالبيانات المخزنة مؤقتًا لمدة 5 دقائق
+    retry: 2, // إعادة المحاولة مرتين فقط إذا فشل الطلب
+    refetchInterval: 60000, // إعادة جلب البيانات كل 60 ثانية تلقائيًا
+    onError: (error) => console.error(`Error fetching ${symbol} price data:`, error)
+  });
+};

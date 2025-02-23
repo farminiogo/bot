@@ -1,284 +1,105 @@
-import axios, { AxiosError } from 'axios';
-import { formatUnits } from 'viem';
+import axios from 'axios';
+import dotenv from 'dotenv';
 
-const ETHERSCAN_API_KEY = 'I6CZ13ZCM2EMNAUY73WR1FJW6U9M3RCGTS';
-const ETHERSCAN_API_URL = 'https://api.etherscan.io/api';
-const CACHE_TTL = 30000; // 30 seconds
-const DEFAULT_TIMEOUT = 10000; // 10 seconds
+dotenv.config();
 
-export interface TokenInfo {
-  name: string;
-  symbol: string;
-  totalSupply: string;
-  decimals: number;
-  holdersCount: number;
-  contractUrl: string;
-  isVerified: boolean;
-  ownerAddress: string | null;
-  transactions: number;
-  price: number | null;
+const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
+const ETHERSCAN_BASE_URL = 'https://api.etherscan.io/api';
+
+if (!ETHERSCAN_API_KEY) {
+  throw new Error('ETHERSCAN_API_KEY is missing in environment variables');
 }
 
-export interface TokenTransaction {
-  hash: string;
-  from: string;
-  to: string;
-  value: string;
-  timestamp: number;
-}
-
-interface CacheEntry<T> {
-  data: T;
-  timestamp: number;
-}
-
-class TokenCache {
-  private cache: Map<string, CacheEntry<any>> = new Map();
-  private readonly ttl: number;
-
-  constructor(ttl: number) {
-    this.ttl = ttl;
-    // Cleanup expired entries every minute
-    setInterval(() => this.cleanup(), 60000);
-  }
-
-  set(key: string, data: any): void {
-    this.cache.set(key, {
-      data,
-      timestamp: Date.now()
-    });
-  }
-
-  get(key: string): any | null {
-    const entry = this.cache.get(key);
-    if (!entry) return null;
-
-    if (Date.now() - entry.timestamp > this.ttl) {
-      this.cache.delete(key);
-      return null;
-    }
-
-    return entry.data;
-  }
-
-  private cleanup(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.cache.entries()) {
-      if (now - entry.timestamp > this.ttl) {
-        this.cache.delete(key);
-      }
-    }
-  }
-}
-
-const tokenCache = new TokenCache(CACHE_TTL);
-
-async function fetchWithRetry(
-  params: Record<string, string>,
-  maxRetries: number = 3
-): Promise<any> {
-  let lastError: Error | null = null;
-  let retryCount = 0;
-
-  while (retryCount < maxRetries) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
-
-      const response = await axios.get(ETHERSCAN_API_URL, {
-        params: {
-          ...params,
-          apikey: ETHERSCAN_API_KEY
-        },
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.data.status === '0') {
-        throw new Error(response.data.message || 'API request failed');
-      }
-
-      return response.data.result;
-    } catch (error) {
-      lastError = error as Error;
-      retryCount++;
-
-      if (error instanceof AxiosError) {
-        // Handle specific error cases
-        if (error.response?.status === 429) {
-          // Rate limit exceeded - wait longer
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          continue;
-        }
-
-        if (error.response?.status === 404) {
-          throw new Error('Contract not found');
-        }
-
-        if (error.response?.status >= 500) {
-          // Server error - use exponential backoff
-          const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 10000);
-          await new Promise(resolve => setTimeout(resolve, backoffDelay));
-          continue;
-        }
-      }
-
-      if (error.name === 'AbortError') {
-        throw new Error('Request timeout');
-      }
-
-      // Network errors - use exponential backoff
-      if (retryCount < maxRetries) {
-        const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 10000);
-        await new Promise(resolve => setTimeout(resolve, backoffDelay));
-        continue;
-      }
-    }
-  }
-
-  throw lastError || new Error('Failed to fetch data after multiple retries');
-}
-
-function validateAndEnhanceTokenInfo(contractData: any, totalSupply: string, transactions: any[]): TokenInfo {
-  // Extract and validate decimals from ABI if available
-  let decimals = 18; // Default to 18
+/**
+ * Fetches transaction history for a given Ethereum address.
+ * @param {string} address - Ethereum wallet address.
+ * @param {number} startBlock - Starting block number (default: 0).
+ * @param {number} endBlock - Ending block number (default: latest block).
+ * @returns {Promise<any[]>} - Array of transactions.
+ */
+export async function getTransactionHistory(
+  address: string,
+  startBlock: number = 0,
+  endBlock: number = 99999999
+): Promise<any[]> {
   try {
-    if (contractData.ABI && contractData.ABI !== 'Contract source code not verified') {
-      const abi = JSON.parse(contractData.ABI);
-      const decimalsFunc = abi.find((item: any) => 
-        item.name === 'decimals' && item.type === 'function'
-      );
-      if (decimalsFunc) {
-        decimals = parseInt(contractData.decimals || '18');
-      }
-    }
-  } catch (e) {
-    console.warn('Failed to parse ABI for decimals:', e);
-  }
-
-  // Validate and format total supply
-  const formattedSupply = totalSupply && !isNaN(Number(totalSupply))
-    ? formatUnits(BigInt(totalSupply), decimals)
-    : '0';
-
-  // Estimate holders count from transactions
-  const uniqueAddresses = new Set<string>();
-  transactions.forEach(tx => {
-    uniqueAddresses.add(tx.from.toLowerCase());
-    uniqueAddresses.add(tx.to.toLowerCase());
-  });
-  const estimatedHolders = Math.max(100, uniqueAddresses.size);
-
-  return {
-    name: contractData.ContractName || 'Unknown Token',
-    symbol: (contractData.ContractName || 'UNKNOWN').slice(0, 5).toUpperCase(),
-    totalSupply: formattedSupply,
-    decimals,
-    holdersCount: estimatedHolders,
-    contractUrl: `https://etherscan.io/token/${contractData.Address}`,
-    isVerified: contractData.ABI !== 'Contract source code not verified',
-    ownerAddress: contractData.ContractCreator || null,
-    transactions: transactions.length,
-    price: null
-  };
-}
-
-export async function getTokenInfo(contractAddress: string): Promise<TokenInfo> {
-  try {
-    // Check cache first
-    const cacheKey = `token_info_${contractAddress}`;
-    const cachedData = tokenCache.get(cacheKey);
-    if (cachedData) {
-      return cachedData;
-    }
-
-    // Fetch all required data concurrently
-    const [contractData, supplyData, transactionsData] = await Promise.allSettled([
-      fetchWithRetry({
-        module: 'contract',
-        action: 'getsourcecode',
-        address: contractAddress
-      }),
-      fetchWithRetry({
-        module: 'stats',
-        action: 'tokensupply',
-        contractaddress: contractAddress
-      }),
-      fetchWithRetry({
+    const response = await axios.get(ETHERSCAN_BASE_URL, {
+      params: {
         module: 'account',
-        action: 'tokentx',
-        contractaddress: contractAddress,
-        page: '1',
-        offset: '100',
-        sort: 'desc'
-      })
-    ]);
+        action: 'txlist',
+        address,
+        startblock: startBlock,
+        endblock: endBlock,
+        sort: 'desc',
+        apikey: ETHERSCAN_API_KEY,
+      },
+    });
 
-    // Handle individual request results
-    const contract = contractData.status === 'fulfilled' ? contractData.value[0] : null;
-    const supply = supplyData.status === 'fulfilled' ? supplyData.value : '0';
-    const transactions = transactionsData.status === 'fulfilled' ? transactionsData.value : [];
-
-    if (!contract) {
-      throw new Error('Failed to fetch contract data');
+    if (response.data.status !== '1') {
+      throw new Error(response.data.message || 'Failed to fetch transactions');
     }
 
-    const tokenInfo = validateAndEnhanceTokenInfo(contract, supply, transactions);
-
-    // Cache the result
-    tokenCache.set(cacheKey, tokenInfo);
-
-    return tokenInfo;
+    return response.data.result;
   } catch (error) {
-    console.error('Failed to fetch token information:', error);
-    throw new Error(error instanceof Error ? error.message : 'Failed to fetch token information');
+    console.error(`Error fetching transactions for ${address}:`, error);
+    return [];
   }
 }
 
-export async function getTokenTransactions(
-  contractAddress: string,
-  page: number = 1,
-  limit: number = 100
-): Promise<TokenTransaction[]> {
+/**
+ * Fetches token balance for a given Ethereum address and token contract.
+ * @param {string} address - Ethereum wallet address.
+ * @param {string} contractAddress - Token contract address.
+ * @returns {Promise<string>} - Token balance.
+ */
+export async function getTokenBalance(
+  address: string,
+  contractAddress: string
+): Promise<string> {
   try {
-    // Check cache first
-    const cacheKey = `token_tx_${contractAddress}_${page}_${limit}`;
-    const cachedData = tokenCache.get(cacheKey);
-    if (cachedData) {
-      return cachedData;
-    }
-
-    const transactions = await fetchWithRetry({
-      module: 'account',
-      action: 'tokentx',
-      contractaddress: contractAddress,
-      page: page.toString(),
-      offset: limit.toString(),
-      sort: 'desc'
+    const response = await axios.get(ETHERSCAN_BASE_URL, {
+      params: {
+        module: 'account',
+        action: 'tokenbalance',
+        contractaddress: contractAddress,
+        address,
+        tag: 'latest',
+        apikey: ETHERSCAN_API_KEY,
+      },
     });
 
-    if (!Array.isArray(transactions)) {
-      throw new Error('Invalid transaction data received');
+    if (response.data.status !== '1') {
+      throw new Error(response.data.message || 'Failed to fetch token balance');
     }
 
-    const formattedTransactions = transactions.map(tx => ({
-      hash: tx.hash,
-      from: tx.from,
-      to: tx.to,
-      value: formatUnits(
-        BigInt(tx.value || '0'),
-        parseInt(tx.tokenDecimal || '18')
-      ),
-      timestamp: parseInt(tx.timeStamp || '0')
-    }));
-
-    // Cache the result
-    tokenCache.set(cacheKey, formattedTransactions);
-
-    return formattedTransactions;
+    return response.data.result;
   } catch (error) {
-    console.error('Failed to fetch token transactions:', error);
-    throw new Error(error instanceof Error ? error.message : 'Failed to fetch token transactions');
+    console.error(`Error fetching token balance for ${address}:`, error);
+    return '0';
+  }
+}
+
+/**
+ * Fetches the latest Ethereum gas price.
+ * @returns {Promise<string>} - Current gas price in Wei.
+ */
+export async function getGasPrice(): Promise<string> {
+  try {
+    const response = await axios.get(ETHERSCAN_BASE_URL, {
+      params: {
+        module: 'gastracker',
+        action: 'gasoracle',
+        apikey: ETHERSCAN_API_KEY,
+      },
+    });
+
+    if (response.data.status !== '1') {
+      throw new Error(response.data.message || 'Failed to fetch gas price');
+    }
+
+    return response.data.result.FastGasPrice;
+  } catch (error) {
+    console.error('Error fetching gas price:', error);
+    return '0';
   }
 }

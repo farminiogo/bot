@@ -1,22 +1,51 @@
-import React, { StrictMode } from 'react';
-import { BrowserRouter } from 'react-router-dom';
-import { QueryClientProvider } from '@tanstack/react-query';
-import { queryClient } from './queryClient';
-import { ErrorBoundary } from './components/ErrorBoundary';
-import { AppRouter } from './AppRouter';
+import React, { useState, useEffect, useCallback } from "react";
+import { BrowserRouter as Router, Route, Routes } from "react-router-dom";
+import { Toaster } from "react-hot-toast";
+import Home from "./pages/Home";
+import Dashboard from "./pages/Dashboard";
+import Navbar from "./components/Navbar";
+import Footer from "./components/Footer";
+import NotFound from "./pages/NotFound";
+import { ThemeProvider } from "./components/ThemeProvider";
 
-function App() {
+const App: React.FC = () => {
+  // إدارة الحالة لتحسين تجربة المستخدم
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    return localStorage.getItem("theme") === "dark";
+  });
+
+  // تبديل وضع الثيم وحفظه في التخزين المحلي
+  const toggleTheme = useCallback(() => {
+    setIsDarkMode((prev) => {
+      const newTheme = !prev;
+      localStorage.setItem("theme", newTheme ? "dark" : "light");
+      return newTheme;
+    });
+  }, []);
+
+  // تحديث الثيم عند تحميل الصفحة
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", isDarkMode);
+  }, [isDarkMode]);
+
   return (
-    <StrictMode>
-      <ErrorBoundary>
-        <QueryClientProvider client={queryClient}>
-          <BrowserRouter>
-            <AppRouter />
-          </BrowserRouter>
-        </QueryClientProvider>
-      </ErrorBoundary>
-    </StrictMode>
+    <ThemeProvider>
+      <Router>
+        <div className={`min-h-screen ${isDarkMode ? "dark" : "light"}`}>
+          <Navbar toggleTheme={toggleTheme} isDarkMode={isDarkMode} />
+          <main className="container mx-auto px-4 py-6">
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </main>
+          <Footer />
+          <Toaster position="top-right" />
+        </div>
+      </Router>
+    </ThemeProvider>
   );
-}
+};
 
-export default App;
+export default React.memo(App);

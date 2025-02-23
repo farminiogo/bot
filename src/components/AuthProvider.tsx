@@ -26,16 +26,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
 
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
+    const initializeAuth = async () => {
+      try {
+        setLoading(true);
+        const { data: { session } } = await supabase.auth.getSession();
+        setSession(session);
+        setUser(session?.user ?? null);
+        if (session?.user) {
+          await fetchProfile(session.user.id);
+        }
+      } catch (err) {
+        console.error('Error initializing session:', err);
+      } finally {
+        setLoading(false);
       }
-    });
+    };
 
-    // Listen for auth changes
+    initializeAuth();
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
@@ -46,7 +54,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setProfile(null);
       }
 
-      // Handle auth state changes
       switch (event) {
         case 'SIGNED_IN':
           navigate('/dashboard');
@@ -54,10 +61,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         case 'SIGNED_OUT':
           navigate('/login');
           break;
+        default:
+          break;
       }
     });
-
-    setLoading(false);
 
     return () => {
       subscription.unsubscribe();
@@ -74,8 +81,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (error) throw error;
       setProfile(data);
-    } catch (error) {
-      console.error('Error fetching profile:', error);
+    } catch (err) {
+      console.error('Error fetching profile:', err);
       setProfile(null);
     }
   };
@@ -83,18 +90,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = async (email: string, password: string) => {
     try {
       setError(null);
+      setLoading(true);
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'خطأ في تسجيل الدخول';
-      setError(message);
-      throw error;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'خطأ في تسجيل الدخول');
+      throw err;
+    } finally {
+      setLoading(false);
     }
   };
 
   const signUp = async (email: string, password: string) => {
     try {
       setError(null);
+      setLoading(true);
       const { error } = await supabase.auth.signUp({
         email,
         password,
@@ -103,22 +113,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       });
       if (error) throw error;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'خطأ في إنشاء الحساب';
-      setError(message);
-      throw error;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'خطأ في إنشاء الحساب');
+      throw err;
+    } finally {
+      setLoading(false);
     }
   };
 
   const signOut = async () => {
     try {
       setError(null);
+      setLoading(true);
       const { error } = await supabase.auth.signOut();
       if (error) throw error;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'خطأ في تسجيل الخروج';
-      setError(message);
-      throw error;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'خطأ في تسجيل الخروج');
+      throw err;
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -142,7 +155,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (context === undefined) {
+  if (!context) {
     throw new Error('useAuth must be used within an AuthProvider');
   }
   return context;

@@ -3,193 +3,101 @@ import TelegramBot from 'node-telegram-bot-api';
 import { binanceWS } from './binanceNode.js';
 import { calculateIndicators, calculateRiskLevels, predictNextPrice } from './technicalAnalysis.js';
 
-// تحميل المتغيرات البيئية
 dotenv.config();
 
-// التأكد من إعدادات التيلجرام
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-  console.error('❌ خطأ: يجب تعيين TELEGRAM_BOT_TOKEN و TELEGRAM_CHAT_ID في ملف .env');
+  console.error('Error: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set in .env file');
   process.exit(1);
 }
 
-// أداة تسجيل الأحداث
 class Logger {
   static info(message) {
-    console.log(`ℹ️ [${new Date().toISOString()}]: ${message}`);
+    console.log(`ℹ️ INFO [${new Date().toISOString()}]: ${message}`);
   }
 
   static warn(message) {
-    console.warn(`⚠️ [${new Date().toISOString()}]: ${message}`);
+    console.warn(`⚠️ WARNING [${new Date().toISOString()}]: ${message}`);
   }
 
   static error(message, error) {
-    console.error(`❌ [${new Date().toISOString()}]: ${message}`, error || '');
+    console.error(`❌ ERROR [${new Date().toISOString()}]: ${message}`, error || '');
   }
 }
 
 class TelegramCryptoBot {
   constructor() {
-    this.bot = null;
+    this.bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true, filepath: false });
     this.marketData = new Map();
+    this.historicalData = new Map();
     this.alerts = new Map();
-    this.isReconnecting = false;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 10;
-    this.reconnectDelay = 5000;
-
-    // العملات المدعومة
-    this.supportedSymbols = {
-      BTCUSDT: 'بيتكوين',
-      ETHUSDT: 'إيثيريوم',
-      BNBUSDT: 'بينانس كوين',
-      SOLUSDT: 'سولانا',
-      XRPUSDT: 'ريبل'
-    };
-  }
-
-  async initialize() {
-    try {
-      Logger.info('🔄 جاري تهيئة بوت التيلجرام...');
-      this.bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-
-      // إعداد الأوامر
-      this.setupCommandHandlers();
-
-      // الاشتراك في تحديثات الأسعار
-      Object.keys(this.supportedSymbols).forEach(symbol => {
-        binanceWS.subscribe(symbol, (data) => this.handlePriceUpdate(data));
-      });
-
-      await this.sendMessage(
-        TELEGRAM_CHAT_ID,
-        '🤖 *بوت التحليل الفني يعمل الآن!*\n\n أرسل /help للحصول على قائمة الأوامر المتاحة.',
-        { parse_mode: 'Markdown' }
-      );
-
-      Logger.info('✅ تم تشغيل البوت بنجاح.');
-    } catch (error) {
-      Logger.error('❌ فشل في تهيئة البوت:', error);
-      this.handleBotError();
-    }
+    this.supportedSymbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT'];
+    this.setupCommandHandlers();
+    this.setupPriceSubscriptions();
   }
 
   setupCommandHandlers() {
-    // أمر المساعدة
-    this.bot.onText(/\/help/, async (msg) => {
-      try {
-        const helpMessage = `
-📌 *الأوامر المتاحة:*
-📊 /status - عرض حالة السوق
-📈 /analysis <رمز العملة> - تحليل فني
-💰 /price <رمز العملة> - عرض السعر الحالي
-🔔 /alerts - إدارة التنبيهات
-❓ /help - عرض المساعدة
-
-✅ *العملات المدعومة:*  
-${Object.entries(this.supportedSymbols).map(([symbol, name]) => `• ${name} (${symbol.replace('USDT', '')})`).join('\n')}
-`;
-        await this.sendMessage(msg.chat.id, helpMessage, { parse_mode: 'Markdown' });
-      } catch (error) {
-        Logger.error('❌ خطأ في معالجة أمر /help:', error);
-      }
+    this.bot.onText(/\/start/, async (msg) => {
+      const welcomeMessage = '🤖 *مرحبًا بك في بوت التحليل الفني!*\n\n' +
+        'يمكنك استخدام الأوامر التالية:\n' +
+        '📈 /price <رمز العملة> - عرض السعر الحالي\n' +
+        '📊 /analysis <رمز العملة> - تحليل فني\n' +
+        '🔔 /alerts - إدارة التنبيهات\n' +
+        '❓ /help - عرض التعليمات';
+      await this.sendMessage(msg.chat.id, welcomeMessage, { parse_mode: 'Markdown' });
     });
 
-    // أمر السعر
-    this.bot.onText(/\/price (.+)/, async (msg, match) => {
-      try {
-        const symbol = (match[1].toUpperCase() + 'USDT');
-        const data = this.marketData.get(symbol);
+    this.bot.onText(/\/price (\w+)/, async (msg, match) => {
+      const symbol = match[1].toUpperCase() + 'USDT';
+      const data = this.marketData.get(symbol);
 
-        if (!data) {
-          return await this.sendMessage(msg.chat.id, '⚠️ لا تتوفر بيانات لهذا الرمز.');
-        }
-
-        const name = this.supportedSymbols[symbol] || symbol;
-        const message = `
-💰 *${name} (${symbol.replace('USDT', '')})*
-السعر الحالي: $${data.price.toFixed(2)}
-التغير 24س: ${data.priceChangePercent.toFixed(2)}%
-أعلى سعر: $${data.high24h.toFixed(2)}
-أدنى سعر: $${data.low24h.toFixed(2)}
-`;
-
-        await this.sendMessage(msg.chat.id, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        Logger.error('❌ خطأ في أمر /price:', error);
+      if (!data) {
+        await this.sendMessage(msg.chat.id, `❌ لا تتوفر بيانات لـ ${symbol}`);
+        return;
       }
+
+      const priceMessage = `💰 *${symbol}*\nالسعر: $${data.price.toFixed(2)}\nالتغير 24س: ${data.priceChangePercent}%`;
+      await this.sendMessage(msg.chat.id, priceMessage, { parse_mode: 'Markdown' });
     });
 
-    // أمر التحليل الفني
-    this.bot.onText(/\/analysis (.+)/, async (msg, match) => {
-      try {
-        const symbol = (match[1].toUpperCase() + 'USDT');
-        const data = this.marketData.get(symbol);
+    this.bot.onText(/\/analysis (\w+)/, async (msg, match) => {
+      const symbol = match[1].toUpperCase() + 'USDT';
+      const prices = this.historicalData.get(symbol) || [];
 
-        if (!data) {
-          return await this.sendMessage(msg.chat.id, '⚠️ لا تتوفر بيانات لهذا الرمز.');
-        }
-
-        const indicators = await calculateIndicators([data.price]);
-        if (!indicators) {
-          return await this.sendMessage(msg.chat.id, '⚠️ تعذر حساب المؤشرات الفنية.');
-        }
-
-        const risk = calculateRiskLevels(data.price, indicators, Math.abs(data.priceChangePercent));
-        const prediction = await predictNextPrice([data.price]);
-
-        const message = `
-📊 *تحليل ${this.supportedSymbols[symbol] || symbol}*
-🔹 السعر الحالي: $${data.price.toFixed(2)}
-🔹 RSI: ${indicators.rsi.toFixed(2)}
-🔹 MACD: ${indicators.macd.MACD.toFixed(2)}
-🔹 المخاطرة: ${risk.riskLevel}
-🔹 السعر المتوقع: $${prediction?.nextPrice.toFixed(2) || 'غير متوفر'}
-🔹 الاتجاه: ${prediction?.trend || 'غير متوفر'}
-`;
-
-        await this.sendMessage(msg.chat.id, message, { parse_mode: 'Markdown' });
-      } catch (error) {
-        Logger.error('❌ خطأ في أمر /analysis:', error);
+      if (prices.length < 50) {
+        await this.sendMessage(msg.chat.id, '❌ البيانات غير كافية للتحليل');
+        return;
       }
+
+      const indicators = await calculateIndicators(prices);
+      const riskAnalysis = calculateRiskLevels(prices[prices.length - 1], indicators, 5);
+      const prediction = await predictNextPrice(prices);
+
+      const analysisMessage = `📊 *تحليل ${symbol}*\n` +
+        `RSI: ${indicators.rsi.toFixed(2)}\n` +
+        `MACD: ${indicators.macd.MACD.toFixed(2)}\n` +
+        `التوقع المستقبلي: $${prediction.nextPrice.toFixed(2)}`;
+      await this.sendMessage(msg.chat.id, analysisMessage, { parse_mode: 'Markdown' });
     });
   }
 
-  handlePriceUpdate(data) {
-    this.marketData.set(data.symbol, data);
+  setupPriceSubscriptions() {
+    this.supportedSymbols.forEach(symbol => {
+      binanceWS.subscribe(symbol, (data) => {
+        this.marketData.set(symbol, data);
+      });
+    });
   }
 
   async sendMessage(chatId, text, options = {}) {
     try {
       await this.bot.sendMessage(chatId, text, options);
     } catch (error) {
-      Logger.error('❌ خطأ في إرسال الرسالة:', error);
+      Logger.error('خطأ في إرسال الرسالة:', error);
     }
-  }
-
-  handleBotError() {
-    if (this.isReconnecting) return;
-
-    this.isReconnecting = true;
-    setTimeout(async () => {
-      this.reconnectAttempts++;
-      if (this.reconnectAttempts > this.maxReconnectAttempts) {
-        Logger.error('❌ تم الوصول إلى الحد الأقصى لمحاولات إعادة الاتصال.');
-        process.exit(1);
-      }
-
-      Logger.info(`🔄 إعادة تشغيل البوت (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-      await this.initialize();
-      this.isReconnecting = false;
-    }, this.reconnectDelay);
   }
 }
 
-// تشغيل البوت
 const bot = new TelegramCryptoBot();
-bot.initialize().catch(error => {
-  Logger.error('❌ فشل تشغيل البوت:', error);
-  process.exit(1);
-});

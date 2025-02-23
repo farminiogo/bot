@@ -1,25 +1,30 @@
-import { useQuery } from '@tanstack/react-query';
-import { getTokenInfo, getTokenTransactions } from '../services/etherscan';
+import { useState, useEffect } from 'react';
 
-export function useTokenData(address: string, enabled = false) {
-  const tokenInfoQuery = useQuery({
-    queryKey: ['tokenInfo', address],
-    queryFn: () => getTokenInfo(address),
-    enabled: enabled && !!address,
-    retry: 1,
-  });
+const THEME_KEY = 'theme';
 
-  const transactionsQuery = useQuery({
-    queryKey: ['tokenTransactions', address],
-    queryFn: () => getTokenTransactions(address),
-    enabled: enabled && !!address && !!tokenInfoQuery.data,
-    retry: 1,
-  });
-
-  return {
-    tokenInfo: tokenInfoQuery.data,
-    transactions: transactionsQuery.data,
-    isLoading: tokenInfoQuery.isLoading || transactionsQuery.isLoading,
-    error: tokenInfoQuery.error || transactionsQuery.error,
+export function useTheme() {
+  const getInitialTheme = () => {
+    if (typeof window !== 'undefined') {
+      const storedTheme = localStorage.getItem(THEME_KEY);
+      if (storedTheme) return storedTheme;
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      return prefersDark ? 'dark' : 'light';
+    }
+    return 'light';
   };
+
+  const [theme, setTheme] = useState(getInitialTheme);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      document.documentElement.classList.toggle('dark', theme === 'dark');
+      localStorage.setItem(THEME_KEY, theme);
+    }
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prevTheme) => (prevTheme === 'dark' ? 'light' : 'dark'));
+  };
+
+  return { theme, toggleTheme };
 }
