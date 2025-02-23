@@ -38,18 +38,83 @@ class TelegramCryptoBot {
     this.maxReconnectAttempts = 10;
     this.reconnectDelay = 5000;
     
+    // تحديث قائمة العملات المدعومة مع معلومات إضافية
     this.supportedSymbols = [
-      'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT'
+      {
+        symbol: 'BTCUSDT',
+        name: 'بيتكوين',
+        displaySymbol: 'BTC',
+        description: 'أكبر عملة رقمية في العالم وأول عملة لامركزية',
+        minQty: 0.00001,
+        category: 'Layer 1',
+        marketCap: 'الأعلى',
+        tradingVolume: 'مرتفع جداً',
+        volatility: 'متوسطة',
+        website: 'bitcoin.org'
+      },
+      {
+        symbol: 'ETHUSDT',
+        name: 'إيثيريوم',
+        displaySymbol: 'ETH',
+        description: 'منصة العقود الذكية الرائدة عالمياً',
+        minQty: 0.001,
+        category: 'Layer 1',
+        marketCap: 'مرتفع',
+        tradingVolume: 'مرتفع جداً',
+        volatility: 'متوسطة',
+        website: 'ethereum.org'
+      },
+      {
+        symbol: 'BNBUSDT',
+        name: 'بينانس كوين',
+        displaySymbol: 'BNB',
+        description: 'العملة الرئيسية لمنصة بينانس',
+        minQty: 0.01,
+        category: 'Exchange Token',
+        marketCap: 'مرتفع',
+        tradingVolume: 'مرتفع',
+        volatility: 'متوسطة',
+        website: 'binance.com'
+      },
+      {
+        symbol: 'SOLUSDT',
+        name: 'سولانا',
+        displaySymbol: 'SOL',
+        description: 'منصة عقود ذكية عالية الأداء',
+        minQty: 0.1,
+        category: 'Layer 1',
+        marketCap: 'مرتفع',
+        tradingVolume: 'مرتفع',
+        volatility: 'عالية',
+        website: 'solana.com'
+      },
+      {
+        symbol: 'XRPUSDT',
+        name: 'ريبل',
+        displaySymbol: 'XRP',
+        description: 'حلول المدفوعات العالمية',
+        minQty: 1,
+        category: 'Payment',
+        marketCap: 'مرتفع',
+        tradingVolume: 'مرتفع',
+        volatility: 'متوسطة',
+        website: 'ripple.com'
+      }
     ];
 
-    // العملات المدعومة باللغة العربية
-    this.symbolsArabic = {
-      'BTCUSDT': 'بيتكوين',
-      'ETHUSDT': 'إيثيريوم',
-      'BNBUSDT': 'بينانس كوين',
-      'SOLUSDT': 'سولانا',
-      'XRPUSDT': 'ريبل'
-    };
+    // تخزين البيانات الأساسية للعملات
+    this.tokenInfo = new Map(this.supportedSymbols.map(token => [
+      token.symbol,
+      {
+        ...token,
+        lastUpdate: Date.now(),
+        price: 0,
+        change24h: 0,
+        volume24h: 0,
+        high24h: 0,
+        low24h: 0
+      }
+    ]));
   }
 
   async initialize() {
@@ -66,8 +131,9 @@ class TelegramCryptoBot {
       this.setupPriceSubscriptions();
 
       await this.sendMessage(TELEGRAM_CHAT_ID, 
-        '🤖 مرحباً بك في بوت التحليل الفني!\n\n' +
-        'أرسل /help للحصول على قائمة الأوامر المتاحة'
+        '🤖 *مرحباً بك في بوت التحليل الفني!*\n\n' +
+        'البوت جاهز للعمل. أرسل /help للحصول على قائمة الأوامر المتاحة.',
+        { parse_mode: 'Markdown' }
       );
       
       Logger.info('تم تشغيل البوت بنجاح');
@@ -103,11 +169,7 @@ class TelegramCryptoBot {
           '💰 /price <رمز العملة> - عرض السعر الحالي',
           '❓ /help - عرض المساعدة\n',
           '*العملات المدعومة:*',
-          'BTC - بيتكوين',
-          'ETH - إيثيريوم',
-          'BNB - بينانس كوين',
-          'SOL - سولانا',
-          'XRP - ريبل'
+          ...this.supportedSymbols.map(t => `• ${t.displaySymbol} - ${t.name}`)
         ].join('\n');
 
         const keyboard = {
@@ -156,27 +218,57 @@ class TelegramCryptoBot {
         }
 
         const fullSymbol = symbol + 'USDT';
-        const data = this.marketData.get(fullSymbol);
+        const tokenData = this.tokenInfo.get(fullSymbol);
+        const marketData = this.marketData.get(fullSymbol);
 
-        if (!data) {
-          await this.sendMessage(msg.chat.id, `لا تتوفر بيانات لـ ${symbol}`);
+        if (!tokenData) {
+          await this.sendMessage(msg.chat.id, `عملة غير مدعومة: ${symbol}`);
           return;
         }
 
-        const arabicName = this.symbolsArabic[fullSymbol] || symbol;
-        const message = [
-          `💰 *${arabicName} (${symbol})*\n`,
-          `السعر الحالي: $${data.price.toFixed(2)}`,
-          `التغير 24س: ${data.priceChangePercent >= 0 ? '+' : ''}${data.priceChangePercent.toFixed(2)}%`,
-          `أعلى سعر 24س: $${data.high24h.toFixed(2)}`,
-          `أدنى سعر 24س: $${data.low24h.toFixed(2)}`,
-          `حجم التداول 24س: $${(data.volume * data.price).toLocaleString()}`
+        const priceMessage = [
+          `💰 *${tokenData.name} (${tokenData.displaySymbol})*\n`,
+          `السعر الحالي: $${marketData?.price?.toFixed(2) || 'غير متوفر'}`,
+          `التغير 24س: ${marketData?.priceChangePercent >= 0 ? '+' : ''}${marketData?.priceChangePercent?.toFixed(2) || '0'}%`,
+          `أعلى سعر 24س: $${marketData?.high24h?.toFixed(2) || 'غير متوفر'}`,
+          `أدنى سعر 24س: $${marketData?.low24h?.toFixed(2) || 'غير متوفر'}`,
+          `حجم التداول 24س: $${(marketData?.volume * marketData?.price || 0).toLocaleString()}\n`,
+          `*معلومات إضافية:*`,
+          `• الفئة: ${tokenData.category}`,
+          `• السيولة: ${tokenData.tradingVolume}`,
+          `• التذبذب: ${tokenData.volatility}`,
+          `• الحد الأدنى للتداول: ${tokenData.minQty} ${tokenData.displaySymbol}`,
+          `\n${tokenData.description}`
         ].join('\n');
 
-        await this.sendMessage(msg.chat.id, message, { parse_mode: 'Markdown' });
+        await this.sendMessage(msg.chat.id, priceMessage, { parse_mode: 'Markdown' });
       } catch (error) {
         Logger.error('خطأ في معالجة أمر السعر:', error);
-        await this.sendMessage(msg.chat.id, 'حدث خطأ أثناء جلب السعر');
+        await this.sendMessage(msg.chat.id, 'حدث خطأ في جلب السعر');
+      }
+    });
+
+    // أمر حالة السوق
+    this.bot.onText(/\/status|📊 حالة السوق/, async (msg) => {
+      try {
+        const marketStatus = [
+          '*📊 حالة السوق*\n',
+          ...Array.from(this.marketData.entries()).map(([symbol, data]) => {
+            const token = this.tokenInfo.get(symbol);
+            if (!token) return '';
+            return [
+              `*${token.name} (${token.displaySymbol})*`,
+              `💰 السعر: $${data.price?.toFixed(2) || '0.00'}`,
+              `📈 التغير: ${data.priceChangePercent >= 0 ? '▲' : '▼'} ${data.priceChangePercent?.toFixed(2) || '0'}%`,
+              `📊 الحجم: $${(data.volume * data.price).toLocaleString()}\n`
+            ].join('\n');
+          }).filter(Boolean).join('\n')
+        ].join('\n');
+
+        await this.sendMessage(msg.chat.id, marketStatus, { parse_mode: 'Markdown' });
+      } catch (error) {
+        Logger.error('خطأ في معالجة أمر حالة السوق:', error);
+        await this.sendMessage(msg.chat.id, 'حدث خطأ في جلب حالة السوق');
       }
     });
 
@@ -192,12 +284,15 @@ class TelegramCryptoBot {
           '💰 /price <رمز العملة> - عرض السعر الحالي',
           '❓ /help - عرض المساعدة\n',
           '*العملات المدعومة:*',
-          'BTC - بيتكوين',
-          'ETH - إيثيريوم',
-          'BNB - بينانس كوين',
-          'SOL - سولانا',
-          'XRP - ريبل\n',
-          'مثال: /price BTC أو /analysis ETH'
+          ...this.supportedSymbols.map(t => `• ${t.displaySymbol} - ${t.name}`),
+          '\n*طريقة الاستخدام:*',
+          '1. استخدم /price BTC لمعرفة سعر البيتكوين',
+          '2. استخدم /analysis ETH للحصول على تحليل فني للإيثيريوم',
+          '3. استخدم /status لمعرفة حالة السوق بشكل عام',
+          '\n*ملاحظات:*',
+          '• يتم تحديث الأسعار كل دقيقة',
+          '• التحليل الفني يعتمد على بيانات آخر 24 ساعة',
+          '• يمكنك استخدام الأزرار أسفل الشاشة للوصول السريع للأوامر'
         ].join('\n');
 
         await this.sendMessage(msg.chat.id, helpMessage, { parse_mode: 'Markdown' });
@@ -209,8 +304,10 @@ class TelegramCryptoBot {
 
   async sendAnalysis(chatId, symbol) {
     try {
-      const data = this.marketData.get(symbol);
-      if (!data) {
+      const tokenData = this.tokenInfo.get(symbol);
+      const marketData = this.marketData.get(symbol);
+      
+      if (!tokenData || !marketData) {
         await this.sendMessage(chatId, `لا تتوفر بيانات لـ ${symbol}`);
         return;
       }
@@ -222,11 +319,9 @@ class TelegramCryptoBot {
       }
 
       const indicators = await calculateIndicators(prices);
-      const riskAnalysis = calculateRiskLevels(data.price, indicators, Math.abs(data.priceChangePercent));
+      const riskAnalysis = calculateRiskLevels(marketData.price, indicators, Math.abs(marketData.priceChangePercent));
       const prediction = await predictNextPrice(prices);
 
-      const arabicName = this.symbolsArabic[symbol] || symbol;
-      
       // تحليل الاتجاه والتوصية
       let recommendation = '';
       let trend = '';
@@ -243,9 +338,9 @@ class TelegramCryptoBot {
       }
 
       const analysis = [
-        `📊 *تحليل ${arabicName}*\n`,
-        `السعر الحالي: $${data.price.toFixed(2)}`,
-        `التغير 24س: ${data.priceChangePercent >= 0 ? '+' : ''}${data.priceChangePercent.toFixed(2)}%\n`,
+        `📊 *تحليل ${tokenData.name}*\n`,
+        `السعر الحالي: $${marketData.price.toFixed(2)}`,
+        `التغير 24س: ${marketData.priceChangePercent >= 0 ? '+' : ''}${marketData.priceChangePercent.toFixed(2)}%\n`,
         `*المؤشرات الفنية:*`,
         `• مؤشر القوة النسبية RSI: ${indicators.rsi.toFixed(2)}`,
         `• مؤشر MACD: ${indicators.macd.MACD.toFixed(2)}`,
@@ -258,7 +353,12 @@ class TelegramCryptoBot {
         `• السعر المتوقع: $${prediction.nextPrice.toFixed(2)}`,
         `• الاتجاه: ${trend}`,
         `• نسبة الثقة: ${(prediction.confidence * 100).toFixed(1)}%\n`,
-        `${recommendation}`
+        `${recommendation}\n`,
+        `*معلومات إضافية:*`,
+        `• الفئة: ${tokenData.category}`,
+        `• السيولة: ${tokenData.tradingVolume}`,
+        `• التذبذب: ${tokenData.volatility}`,
+        `• الموقع: ${tokenData.website}`
       ].join('\n');
 
       await this.sendMessage(chatId, analysis, { parse_mode: 'Markdown' });
@@ -280,8 +380,8 @@ class TelegramCryptoBot {
   }
 
   setupPriceSubscriptions() {
-    this.supportedSymbols.forEach(symbol => {
-      binanceWS.subscribe(symbol, (data) => {
+    this.supportedSymbols.forEach(token => {
+      binanceWS.subscribe(token.symbol, (data) => {
         this.handlePriceUpdate(data);
       });
     });
@@ -297,6 +397,17 @@ class TelegramCryptoBot {
       if (prices.length > 100) prices.shift();
       this.historicalData.set(data.symbol, prices);
 
+      // تحديث معلومات العملة
+      const tokenInfo = this.tokenInfo.get(data.symbol);
+      if (tokenInfo) {
+        tokenInfo.price = data.price;
+        tokenInfo.change24h = data.priceChangePercent;
+        tokenInfo.volume24h = data.volume;
+        tokenInfo.high24h = data.high24h;
+        tokenInfo.low24h = data.low24h;
+        tokenInfo.lastUpdate = Date.now();
+      }
+
       // التحقق من التنبيهات
       const symbolAlerts = this.alerts.get(data.symbol) || [];
       symbolAlerts.forEach(async (alert) => {
@@ -304,10 +415,10 @@ class TelegramCryptoBot {
           (alert.condition === 'above' && data.price >= alert.price) ||
           (alert.condition === 'below' && data.price <= alert.price)
         ) {
-          const arabicName = this.symbolsArabic[data.symbol] || data.symbol;
+          const token = this.tokenInfo.get(data.symbol);
           await this.sendMessage(
             alert.chatId,
-            `🔔 *تنبيه سعري*\n${arabicName} ${alert.condition === 'above' ? 'تجاوز' : 'أقل من'} $${alert.price}!`,
+            `🔔 *تنبيه سعري*\n${token.name} ${alert.condition === 'above' ? 'تجاوز' : 'أقل من'} $${alert.price}!`,
             { parse_mode: 'Markdown' }
           );
           this.alerts.set(
