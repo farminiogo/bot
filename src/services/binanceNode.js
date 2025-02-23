@@ -41,7 +41,10 @@ class BinanceWebSocket {
 
   async fetchInitialData() {
     try {
-      const response = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+      const response = await fetch('https://api1.binance.com/api/v3/ticker/24hr');
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       const data = await response.json();
       
       data.forEach(ticker => {
@@ -67,13 +70,6 @@ class BinanceWebSocket {
     }
   }
 
-  getExponentialBackoff() {
-    return Math.min(
-      this.baseReconnectDelay * Math.pow(this.backoffMultiplier, this.reconnectAttempts),
-      this.maxBackoffDelay
-    );
-  }
-
   connect() {
     if (this.isReconnecting) {
       console.warn('محاولة اتصال جارية بالفعل');
@@ -86,12 +82,8 @@ class BinanceWebSocket {
       this.cleanup();
       console.log('جاري الاتصال بخادم Binance...');
       
-      const streams = Array.from(this.subscribers.keys())
-        .map(symbol => `${symbol.toLowerCase()}@ticker`);
-      
-      const url = streams.length > 0
-        ? `wss://stream.binance.com:9443/ws/${streams.join('/')}`
-        : 'wss://stream.binance.com:9443/ws';
+      // Use a more reliable endpoint
+      const url = 'wss://stream.binance.com:9443/ws';
 
       this.ws = new WebSocket(url, {
         perMessageDeflate: false,
@@ -140,11 +132,7 @@ class BinanceWebSocket {
           return;
         }
 
-        if (Array.isArray(message)) {
-          message.forEach(ticker => this.processTicker(ticker));
-        } else if (message.data) {
-          this.processTicker(message.data);
-        } else if (message.e === '24hrTicker') {
+        if (message.e === '24hrTicker') {
           this.processTicker(message);
         }
       } catch (error) {
@@ -264,7 +252,10 @@ class BinanceWebSocket {
     try {
       if (this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
-        const delay = this.getExponentialBackoff();
+        const delay = Math.min(
+          this.baseReconnectDelay * Math.pow(this.backoffMultiplier, this.reconnectAttempts),
+          this.maxBackoffDelay
+        );
         console.log(`محاولة إعادة الاتصال ${this.reconnectAttempts} خلال ${delay}ms`);
         
         setTimeout(() => {
@@ -337,7 +328,10 @@ class BinanceWebSocket {
 
   async fetchSymbolData(symbol) {
     try {
-      const response = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
+      const response = await fetch(`https://api1.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       const ticker = await response.json();
       
       const priceData = {
