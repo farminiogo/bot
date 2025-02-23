@@ -1,187 +1,93 @@
-import { RSI, MACD, BollingerBands, EMA } from 'technicalindicators';
+import { RSI, MACD, BollingerBands, EMA, ATR } from 'technicalindicators';
+import * as tf from '@tensorflow/tfjs';
 
-// Calculate standard deviation for volatility
-function calculateStandardDeviation(values, mean) {
-  const squareDiffs = values.map(value => Math.pow(value - mean, 2));
-  const avgSquareDiff = squareDiffs.reduce((sum, diff) => sum + diff, 0) / values.length;
-  return Math.sqrt(avgSquareDiff);
+// تعريف نوع الاتجاه
+type Trend = 'up' | 'down' | 'neutral';
+
+// تعريف مستويات المخاطر
+type RiskLevel = 'very_low' | 'low' | 'medium' | 'high' | 'very_high';
+
+// **1️⃣ - دوال حساب المؤشرات الفنية**
+export function calculateIndicators(prices: number[]) {
+  if (prices.length < 50) {
+    throw new Error('❌ بيانات غير كافية لحساب المؤشرات');
+  }
+
+  const rsi = RSI.calculate({ values: prices, period: 14 }).pop() || 50;
+  const macd = MACD.calculate({ values: prices, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9 }).pop() || { MACD: 0, signal: 0 };
+  const bollinger = BollingerBands.calculate({ values: prices, period: 20, stdDev: 2 }).pop() || { upper: 0, middle: 0, lower: 0 };
+  const ema = EMA.calculate({ values: prices, period: 50 }).pop() || prices[prices.length - 1];
+  const atr = ATR.calculate({ high: prices, low: prices, close: prices, period: 14 }).pop() || 0;
+
+  return { rsi, macd, bollinger, ema, atr };
 }
 
-export async function calculateIndicators(prices) {
-  if (!Array.isArray(prices) || prices.length < 50) {
-    throw new Error('Insufficient price data for technical analysis');
+// **2️⃣ - تحليل المخاطر ووقف الخسارة**
+export function calculateRisk(currentPrice: number, indicators: ReturnType<typeof calculateIndicators>) {
+  const riskMultiplier = 2;
+  const stopLoss = currentPrice - indicators.atr * riskMultiplier;
+  const takeProfit = currentPrice + indicators.atr * riskMultiplier * 2;
+  const riskRatio = (currentPrice - stopLoss) / (takeProfit - currentPrice);
+  const riskLevel: RiskLevel = riskRatio > 1.5 ? 'high' : riskRatio > 1 ? 'medium' : 'low';
+
+  return { stopLoss, takeProfit, riskLevel };
+}
+
+// **3️⃣ - توقع السعر القادم باستخدام التعلم العميق**
+export async function predictNextPrice(prices: number[]): Promise<{ nextPrice: number; confidence: number; trend: Trend }> {
+  if (prices.length < 30) {
+    throw new Error('❌ بيانات غير كافية لتوقع السعر');
   }
 
-  // Convert prices to numbers and validate
-  const validPrices = prices.map(price => Number(price)).filter(price => !isNaN(price));
-  if (validPrices.length < 50) {
-    throw new Error('Invalid price data');
+  // إنشاء نموذج التعلم العميق
+  const model = tf.sequential();
+  model.add(tf.layers.lstm({ units: 50, inputShape: [30, 1], returnSequences: true }));
+  model.add(tf.layers.lstm({ units: 30, returnSequences: false }));
+  model.add(tf.layers.dense({ units: 1 }));
+
+  model.compile({ optimizer: 'adam', loss: 'meanSquaredError' });
+
+  // تجهيز البيانات للنموذج
+  const input = tf.tensor3d([prices.slice(-30)], [1, 30, 1]);
+  const prediction = (model.predict(input) as tf.Tensor).dataSync()[0];
+
+  // تحليل الاتجاه المتوقع
+  const trend: Trend = prediction > prices[prices.length - 1] ? 'up' : prediction < prices[prices.length - 1] ? 'down' : 'neutral';
+  const confidence = Math.abs(prediction - prices[prices.length - 1]) / prices[prices.length - 1];
+
+  return { nextPrice: prediction, confidence, trend };
+}
+
+// **4️⃣ - إنشاء توصية التداول (شراء/بيع/انتظار)**
+export function generateRecommendation(indicators: ReturnType<typeof calculateIndicators>, currentPrice: number) {
+  let action: 'buy' | 'sell' | 'hold' = 'hold';
+  let confidence = 0.5;
+  let reason = 'استقرار السوق';
+
+  if (indicators.rsi < 30 && indicators.macd.MACD > indicators.macd.signal) {
+    action = 'buy';
+    confidence = 0.85;
+    reason = 'السوق في منطقة شراء قوية (Oversold)';
+  } else if (indicators.rsi > 70 && indicators.macd.MACD < indicators.macd.signal) {
+    action = 'sell';
+    confidence = 0.85;
+    reason = 'السوق في منطقة بيع قوية (Overbought)';
   }
 
+  return { action, confidence, reason };
+}
+
+// **5️⃣ - التحليل الفني الكامل**
+export async function analyzeMarket(prices: number[]) {
   try {
-    const rsi = RSI.calculate({
-      values: validPrices,
-      period: 14
-    });
+    const indicators = calculateIndicators(prices);
+    const risk = calculateRisk(prices[prices.length - 1], indicators);
+    const prediction = await predictNextPrice(prices);
+    const recommendation = generateRecommendation(indicators, prices[prices.length - 1]);
 
-    const macd = MACD.calculate({
-      values: validPrices,
-      fastPeriod: 12,
-      slowPeriod: 26,
-      signalPeriod: 9
-    });
-
-    const bollinger = BollingerBands.calculate({
-      values: validPrices,
-      period: 20,
-      stdDev: 2
-    });
-
-    const ema = EMA.calculate({
-      values: validPrices,
-      period: 50
-    });
-
-    // Calculate volatility
-    const returns = validPrices.slice(1).map((price, i) => 
-      (price - validPrices[i]) / validPrices[i]
-    );
-    
-    const mean = returns.reduce((sum, ret) => sum + ret, 0) / returns.length;
-    const volatility = calculateStandardDeviation(returns, mean);
-
-    return {
-      rsi: rsi[rsi.length - 1] || 50,
-      macd: macd[macd.length - 1] || { MACD: 0, signal: 0, histogram: 0 },
-      bollinger: bollinger[bollinger.length - 1] || {
-        upper: validPrices[validPrices.length - 1] * 1.02,
-        middle: validPrices[validPrices.length - 1],
-        lower: validPrices[validPrices.length - 1] * 0.98
-      },
-      ema: ema[ema.length - 1] || validPrices[validPrices.length - 1],
-      volatility: volatility || 0
-    };
+    return { indicators, risk, prediction, recommendation };
   } catch (error) {
-    console.error('Error calculating indicators:', error);
-    throw error;
+    console.error('❌ خطأ أثناء تحليل السوق:', error);
+    return null;
   }
 }
-
-export function calculateRiskLevels(currentPrice, indicators, volatility) {
-  try {
-    // Enhanced risk calculation using multiple factors
-    let riskScore = 0;
-    
-    // RSI extremes
-    if (indicators.rsi > 80) riskScore += 3;
-    else if (indicators.rsi > 70) riskScore += 2;
-    else if (indicators.rsi < 20) riskScore += 3;
-    else if (indicators.rsi < 30) riskScore += 2;
-    
-    // MACD divergence
-    if (Math.abs(indicators.macd.histogram) > indicators.macd.signal * 1.5) {
-      riskScore += 2;
-    }
-    
-    // Bollinger Band position
-    if (currentPrice > indicators.bollinger.upper * 1.05) riskScore += 3;
-    else if (currentPrice > indicators.bollinger.upper) riskScore += 2;
-    else if (currentPrice < indicators.bollinger.lower * 0.95) riskScore += 3;
-    else if (currentPrice < indicators.bollinger.lower) riskScore += 2;
-    
-    // Volatility factor
-    if (volatility > 0.05) riskScore += 2;
-    else if (volatility > 0.03) riskScore += 1;
-
-    // Calculate stop loss and take profit levels
-    const atrMultiplier = Math.max(2, volatility * 100);
-    const stopLoss = currentPrice * (1 - (atrMultiplier * 0.01));
-    const takeProfit = currentPrice + ((currentPrice - stopLoss) * 2); // 1:2 risk/reward
-
-    // Determine risk level
-    let riskLevel;
-    if (riskScore >= 12) riskLevel = 'very_high';
-    else if (riskScore >= 8) riskLevel = 'high';
-    else if (riskScore >= 5) riskLevel = 'medium';
-    else if (riskScore >= 2) riskLevel = 'low';
-    else riskLevel = 'very_low';
-
-    return {
-      stopLoss,
-      takeProfit,
-      riskLevel,
-      riskRatio: riskScore / 15 // Normalize to 0-1 range
-    };
-  } catch (error) {
-    console.error('Error calculating risk levels:', error);
-    // Return safe default values
-    return {
-      stopLoss: currentPrice * 0.95,
-      takeProfit: currentPrice * 1.05,
-      riskLevel: 'medium',
-      riskRatio: 0.5
-    };
-  }
-}
-
-export async function predictNextPrice(prices) {
-  try {
-    const windowSize = 30;
-    if (!Array.isArray(prices) || prices.length < windowSize) {
-      throw new Error('Insufficient data for prediction');
-    }
-
-    // Convert prices to numbers and validate
-    const validPrices = prices.map(price => Number(price)).filter(price => !isNaN(price));
-    if (validPrices.length < windowSize) {
-      throw new Error('Invalid price data');
-    }
-
-    // Calculate simple moving average
-    const sma = validPrices.slice(-windowSize).reduce((sum, price) => sum + price, 0) / windowSize;
-    
-    // Calculate momentum
-    const recentPrices = validPrices.slice(-5);
-    const momentum = (recentPrices[recentPrices.length - 1] - recentPrices[0]) / recentPrices[0];
-    
-    // Predict next price using SMA and momentum
-    const nextPrice = sma * (1 + momentum);
-    
-    // Calculate prediction confidence based on volatility
-    const returns = validPrices.slice(1).map((price, i) => 
-      (price - validPrices[i]) / validPrices[i]
-    );
-    
-    const mean = returns.reduce((sum, ret) => sum + ret, 0) / returns.length;
-    const volatility = calculateStandardDeviation(returns, mean);
-    const confidence = Math.max(0.1, Math.min(0.9, 1 - volatility));
-
-    // Determine trend
-    const currentPrice = validPrices[validPrices.length - 1];
-    const trend = nextPrice > currentPrice * 1.01 ? 'up' :
-                 nextPrice < currentPrice * 0.99 ? 'down' : 
-                 'neutral';
-
-    return {
-      nextPrice,
-      confidence,
-      trend
-    };
-  } catch (error) {
-    console.error('Error predicting price:', error);
-    
-    // Return a fallback prediction based on simple moving average
-    const currentPrice = prices[prices.length - 1];
-    return {
-      nextPrice: currentPrice,
-      confidence: 0.5,
-      trend: 'neutral'
-    };
-  }
-}
-
-// Add Math.std helper function
-Math.std = function(values) {
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  return calculateStandardDeviation(values, mean);
-};
