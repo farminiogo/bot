@@ -41,10 +41,33 @@ class BinanceWebSocket {
 
   async fetchInitialData() {
     try {
-      const response = await fetch('https://api1.binance.com/api/v3/ticker/24hr');
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      // Try multiple Binance API endpoints
+      const endpoints = [
+        'https://api1.binance.com/api/v3/ticker/24hr',
+        'https://api2.binance.com/api/v3/ticker/24hr',
+        'https://api3.binance.com/api/v3/ticker/24hr'
+      ];
+
+      let response = null;
+      let error = null;
+
+      for (const endpoint of endpoints) {
+        try {
+          const res = await fetch(endpoint);
+          if (res.ok) {
+            response = res;
+            break;
+          }
+        } catch (e) {
+          error = e;
+          continue;
+        }
       }
+
+      if (!response) {
+        throw error || new Error('Failed to fetch data from all endpoints');
+      }
+
       const data = await response.json();
       
       data.forEach(ticker => {
@@ -59,7 +82,9 @@ class BinanceWebSocket {
           lastUpdate: Date.now()
         };
 
-        this.lastData.set(ticker.symbol, priceData);
+        if (!Object.values(priceData).some(val => isNaN(val))) {
+          this.lastData.set(ticker.symbol, priceData);
+        }
       });
 
       this.initialDataFetched = true;
@@ -82,26 +107,45 @@ class BinanceWebSocket {
       this.cleanup();
       console.log('جاري الاتصال بخادم Binance...');
       
-      // Use a more reliable endpoint
-      const url = 'wss://stream.binance.com:9443/ws';
+      // Try multiple WebSocket endpoints
+      const endpoints = [
+        'wss://stream.binance.com:9443/ws',
+        'wss://ws-api.binance.com:443/ws-api/v3'
+      ];
 
-      this.ws = new WebSocket(url, {
-        perMessageDeflate: false,
-        handshakeTimeout: this.connectionTimeout,
-        headers: {
-          'User-Agent': 'Mozilla/5.0'
+      let connected = false;
+      let lastError = null;
+
+      for (const endpoint of endpoints) {
+        try {
+          this.ws = new WebSocket(endpoint, {
+            perMessageDeflate: false,
+            handshakeTimeout: this.connectionTimeout,
+            headers: {
+              'User-Agent': 'Mozilla/5.0'
+            }
+          });
+
+          const connectionTimeoutId = setTimeout(() => {
+            if (this.ws?.readyState !== WebSocket.OPEN) {
+              console.error('انتهت مهلة الاتصال');
+              this.ws?.terminate();
+              this.handleReconnect();
+            }
+          }, this.connectionTimeout);
+
+          this.setupWebSocketHandlers(connectionTimeoutId);
+          connected = true;
+          break;
+        } catch (error) {
+          lastError = error;
+          continue;
         }
-      });
+      }
 
-      const connectionTimeoutId = setTimeout(() => {
-        if (this.ws?.readyState !== WebSocket.OPEN) {
-          console.error('انتهت مهلة الاتصال');
-          this.ws?.terminate();
-          this.handleReconnect();
-        }
-      }, this.connectionTimeout);
-
-      this.setupWebSocketHandlers(connectionTimeoutId);
+      if (!connected) {
+        throw lastError || new Error('Failed to connect to all endpoints');
+      }
     } catch (error) {
       console.error('خطأ في إنشاء اتصال WebSocket:', error);
       this.handleReconnect();
@@ -218,10 +262,8 @@ class BinanceWebSocket {
 
     this.heartbeatInterval = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        // Send ping
         this.ws.ping();
 
-        // Check if we received pong
         setTimeout(() => {
           if (Date.now() - this.lastPongTime > this.pongTimeout) {
             console.warn('لم يتم استلام رد، جاري إعادة الاتصال...');
@@ -328,10 +370,33 @@ class BinanceWebSocket {
 
   async fetchSymbolData(symbol) {
     try {
-      const response = await fetch(`https://api1.binance.com/api/v3/ticker/24hr?symbol=${symbol}`);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      // Try multiple endpoints
+      const endpoints = [
+        `https://api1.binance.com/api/v3/ticker/24hr?symbol=${symbol}`,
+        `https://api2.binance.com/api/v3/ticker/24hr?symbol=${symbol}`,
+        `https://api3.binance.com/api/v3/ticker/24hr?symbol=${symbol}`
+      ];
+
+      let response = null;
+      let error = null;
+
+      for (const endpoint of endpoints) {
+        try {
+          const res = await fetch(endpoint);
+          if (res.ok) {
+            response = res;
+            break;
+          }
+        } catch (e) {
+          error = e;
+          continue;
+        }
       }
+
+      if (!response) {
+        throw error || new Error('Failed to fetch data from all endpoints');
+      }
+
       const ticker = await response.json();
       
       const priceData = {
@@ -345,8 +410,12 @@ class BinanceWebSocket {
         lastUpdate: Date.now()
       };
 
-      this.lastData.set(symbol, priceData);
-      return priceData;
+      if (!Object.values(priceData).some(val => isNaN(val))) {
+        this.lastData.set(symbol, priceData);
+        return priceData;
+      }
+
+      return null;
     } catch (error) {
       console.error(`خطأ في تحميل بيانات ${symbol}:`, error);
       return null;

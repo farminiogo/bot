@@ -1,6 +1,5 @@
 import type { PriceData } from './types';
 
-// Enhanced logging utility with English messages
 class Logger {
   static info(message: string, ...args: any[]) {
     console.log(`ℹ️ [${new Date().toISOString()}]: ${message}`, ...args);
@@ -39,6 +38,15 @@ class BinanceWebSocket {
   private defaultSymbols = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT'];
   private retryQueue: (() => void)[] = [];
   private maxQueueSize = 50;
+  private readonly wsEndpoints = [
+    'wss://stream.binance.com:9443/ws',
+    'wss://ws-api.binance.com:443/ws-api/v3'
+  ];
+  private readonly apiEndpoints = [
+    'https://api1.binance.com/api/v3',
+    'https://api2.binance.com/api/v3',
+    'https://api3.binance.com/api/v3'
+  ];
 
   constructor() {
     this.initializeConnection();
@@ -69,31 +77,69 @@ class BinanceWebSocket {
     }
   }
 
-  private verifyConnection() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.connect();
-    } else {
-      this.ping();
+  private async fetchWithRetry(endpoint: string, options: RequestInit = {}, retries = 3): Promise<Response> {
+    let lastError: Error | null = null;
+    
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch(endpoint, {
+          ...options,
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0',
+            ...options.headers
+          }
+        });
+
+        if (response.ok) {
+          return response;
+        }
+
+        throw new Error(`HTTP error! status: ${response.status}`);
+      } catch (error) {
+        lastError = error as Error;
+        if (i < retries - 1) {
+          await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+        }
+      }
     }
+
+    throw lastError || new Error('Failed to fetch after multiple retries');
+  }
+
+  private async fetchFromMultipleEndpoints(path: string): Promise<Response> {
+    let lastError: Error | null = null;
+
+    for (const baseUrl of this.apiEndpoints) {
+      try {
+        const response = await this.fetchWithRetry(`${baseUrl}${path}`);
+        if (response.ok) {
+          return response;
+        }
+      } catch (error) {
+        lastError = error as Error;
+        continue;
+      }
+    }
+
+    throw lastError || new Error('Failed to fetch from all endpoints');
   }
 
   private async initializeConnection() {
     try {
-      // Initialize with default data
       this.initializeDefaultData();
       
       if (this.isOnline) {
-        // Try to fetch real data
         await this.fetchInitialData();
       }
       
-      // Setup connection
       this.connect();
       this.startConnectionCheck();
       
       this.isInitialized = true;
+      Logger.info('WebSocket connection initialized');
     } catch (error) {
-      Logger.warn('Failed to load initial data, using default data');
+      Logger.warn('Failed to initialize connection, using default data');
     }
   }
 
@@ -119,24 +165,8 @@ class BinanceWebSocket {
   }
 
   private async fetchInitialData() {
-    if (!this.isOnline) {
-      throw new Error('No network connection');
-    }
-
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetch('https://api.binance.com/api/v3/ticker/24hr', {
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
+      const response = await this.fetchFromMultipleEndpoints('/ticker/24hr');
       const data = await response.json();
       
       data.forEach((ticker: any) => {
@@ -161,30 +191,10 @@ class BinanceWebSocket {
         }
       });
 
-      Logger.info('Initial data loaded successfully');
+      Logger.info('Initial market data loaded successfully');
     } catch (error) {
-      Logger.warn('Failed to load initial data, will retry later');
-      this.addToRetryQueue(() => this.fetchInitialData());
+      Logger.error('Failed to fetch initial market data:', error);
       throw error;
-    }
-  }
-
-  private addToRetryQueue(operation: () => void) {
-    if (this.retryQueue.length < this.maxQueueSize) {
-      this.retryQueue.push(operation);
-    }
-  }
-
-  private processRetryQueue() {
-    while (this.retryQueue.length > 0 && this.isOnline) {
-      const operation = this.retryQueue.shift();
-      if (operation) {
-        try {
-          operation();
-        } catch (error) {
-          Logger.error('Error processing retry operation:', error);
-        }
-      }
     }
   }
 
@@ -195,46 +205,61 @@ class BinanceWebSocket {
 
     this.isReconnecting = true;
 
-    try {
-      this.cleanup(false);
-      
-      // Fix: Change URL format to use single stream with multiple symbols
-      const streams = Array.from(this.subscriptionCounts.keys())
-        .map(symbol => `${symbol.toLowerCase()}@ticker`);
-      
-      const url = `wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`;
+    const tryConnect = async (endpoint: string): Promise<boolean> => {
+      try {
+        this.cleanup(false);
+        
+        this.ws = new WebSocket(endpoint);
+        this.ws.binaryType = 'blob';
 
-      this.ws = new WebSocket(url);
-      this.ws.binaryType = 'blob';
+        return new Promise((resolve) => {
+          const timeoutId = setTimeout(() => {
+            if (this.ws?.readyState !== WebSocket.OPEN) {
+              this.cleanup(false);
+              resolve(false);
+            }
+          }, this.connectionTimeout);
 
-      const connectionTimeoutId = setTimeout(() => {
-        if (this.ws?.readyState !== WebSocket.OPEN) {
-          Logger.error('Connection timeout');
-          this.cleanup(true);
-          this.handleReconnect();
+          this.setupWebSocketHandlers(() => {
+            clearTimeout(timeoutId);
+            resolve(true);
+          });
+        });
+      } catch (error) {
+        Logger.error(`Failed to connect to ${endpoint}:`, error);
+        return false;
+      }
+    };
+
+    const connectToEndpoints = async () => {
+      for (const endpoint of this.wsEndpoints) {
+        if (await tryConnect(endpoint)) {
+          return true;
         }
-      }, this.connectionTimeout);
+      }
+      return false;
+    };
 
-      this.setupWebSocketHandlers(connectionTimeoutId);
-    } catch (error) {
-      Logger.error('Error creating WebSocket connection:', error);
-      this.handleReconnect();
-    }
+    connectToEndpoints().then(success => {
+      if (!success) {
+        Logger.error('Failed to connect to all WebSocket endpoints');
+        this.handleReconnect();
+      }
+    });
   }
 
-  private setupWebSocketHandlers(connectionTimeoutId: number) {
+  private setupWebSocketHandlers(onOpen: () => void) {
     if (!this.ws) return;
 
     this.ws.onopen = () => {
-      clearTimeout(connectionTimeoutId);
-      Logger.info('Connected successfully');
+      Logger.info('WebSocket connected successfully');
       this.reconnectAttempts = 0;
       this.isReconnecting = false;
       this.lastMessageTime = Date.now();
       this.lastPongTime = Date.now();
       this.startHeartbeat();
       this.resubscribeAll();
-      this.processRetryQueue();
+      onOpen();
     };
 
     this.ws.onmessage = (event) => {
@@ -247,12 +272,7 @@ class BinanceWebSocket {
           return;
         }
 
-        // Fix: Handle stream data format
-        if (data.stream && data.data) {
-          this.processTicker(data.data);
-        } else if (Array.isArray(data)) {
-          data.forEach(ticker => this.processTicker(ticker));
-        } else if (data.e === '24hrTicker') {
+        if (data.e === '24hrTicker') {
           this.processTicker(data);
         }
       } catch (error) {
@@ -261,48 +281,13 @@ class BinanceWebSocket {
     };
 
     this.ws.onerror = (error) => {
-      clearTimeout(connectionTimeoutId);
       Logger.error('WebSocket error:', error);
       this.handleReconnect();
     };
 
     this.ws.onclose = () => {
-      clearTimeout(connectionTimeoutId);
       this.handleReconnect();
     };
-  }
-
-  private ping() {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ ping: Date.now() }));
-    }
-  }
-
-  private cleanup(reconnect = true) {
-    if (this.ws) {
-      try {
-        this.ws.onopen = null;
-        this.ws.onmessage = null;
-        this.ws.onerror = null;
-        this.ws.onclose = null;
-        
-        if (this.ws.readyState === WebSocket.OPEN) {
-          this.ws.close();
-        }
-      } catch (e) {
-        Logger.warn('Error during cleanup:', e);
-      }
-      this.ws = null;
-    }
-
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-
-    if (reconnect) {
-      this.handleReconnect();
-    }
   }
 
   private startHeartbeat() {
@@ -312,7 +297,7 @@ class BinanceWebSocket {
 
     this.heartbeatInterval = window.setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ping();
+        this.ws.send(JSON.stringify({ ping: Date.now() }));
 
         setTimeout(() => {
           if (Date.now() - this.lastPongTime > this.pongTimeout) {
@@ -369,6 +354,33 @@ class BinanceWebSocket {
     }
   }
 
+  private cleanup(reconnect = true) {
+    if (this.ws) {
+      try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
+        
+        if (this.ws.readyState === WebSocket.OPEN) {
+          this.ws.close();
+        }
+      } catch (e) {
+        Logger.warn('Error during cleanup:', e);
+      }
+      this.ws = null;
+    }
+
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+
+    if (reconnect) {
+      this.handleReconnect();
+    }
+  }
+
   private processTicker(ticker: any) {
     if (!ticker || !ticker.s) return;
 
@@ -408,15 +420,19 @@ class BinanceWebSocket {
         .map(symbol => `${symbol.toLowerCase()}@ticker`);
 
       if (streams.length > 0) {
-        // Fix: Use correct subscription format
         const subscribeMsg = {
           method: 'SUBSCRIBE',
           params: streams,
           id: Date.now()
         };
 
-        this.ws.send(JSON.stringify(subscribeMsg));
-        Logger.info('Resubscribed to:', streams);
+        try {
+          this.ws.send(JSON.stringify(subscribeMsg));
+          Logger.info('Resubscribed to:', streams);
+        } catch (error) {
+          Logger.error('Error resubscribing:', error);
+          this.handleReconnect();
+        }
       }
     }
   }
@@ -434,7 +450,14 @@ class BinanceWebSocket {
 
     if (count === 0) {
       this.pendingSubscriptions.add(symbol);
-      this.connect();
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        const subscribeMsg = {
+          method: 'SUBSCRIBE',
+          params: [`${symbol.toLowerCase()}@ticker`],
+          id: Date.now()
+        };
+        this.ws.send(JSON.stringify(subscribeMsg));
+      }
     }
 
     const lastData = this.lastData.get(symbol);
@@ -452,12 +475,16 @@ class BinanceWebSocket {
         this.pendingSubscriptions.delete(symbol);
         
         if (this.ws?.readyState === WebSocket.OPEN) {
-          const unsubscribeMsg = {
-            method: 'UNSUBSCRIBE',
-            params: [`${symbol.toLowerCase()}@ticker`],
-            id: Date.now()
-          };
-          this.ws.send(JSON.stringify(unsubscribeMsg));
+          try {
+            const unsubscribeMsg = {
+              method: 'UNSUBSCRIBE',
+              params: [`${symbol.toLowerCase()}@ticker`],
+              id: Date.now()
+            };
+            this.ws.send(JSON.stringify(unsubscribeMsg));
+          } catch (error) {
+            Logger.error('Error unsubscribing:', error);
+          }
         }
         this.subscriptionCounts.delete(symbol);
       }

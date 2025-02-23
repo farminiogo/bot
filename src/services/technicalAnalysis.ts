@@ -25,12 +25,18 @@ export interface TechnicalIndicators {
   };
   ema: number;
   atr: number;
+  volume: number;
+  momentum: number;
+  trendStrength: number;
 }
 
 export interface PricePrediction {
   nextPrice: number;
   confidence: number;
   trend: typeof TRENDS[keyof typeof TRENDS];
+  supportLevels: number[];
+  resistanceLevels: number[];
+  timeframe: '1h' | '4h' | '1d';
 }
 
 export interface RiskAnalysis {
@@ -38,6 +44,13 @@ export interface RiskAnalysis {
   takeProfit: number;
   riskLevel: RiskLevel;
   riskRatio: number;
+  maxDrawdown: number;
+  volatility: number;
+  recommendation: {
+    action: 'buy' | 'sell' | 'hold';
+    confidence: number;
+    reason: string;
+  };
 }
 
 // Cache for model to avoid reloading
@@ -84,7 +97,7 @@ function calculateEMA(prices: number[], period: number): number[] {
   }
 }
 
-function calculateMomentum(prices: number[], period: number = 5): number {
+function calculateMomentum(prices: number[], period: number = 10): number {
   try {
     const recentPrices = prices.slice(-period);
     if (recentPrices.length < 2) return 0;
@@ -98,6 +111,39 @@ function calculateMomentum(prices: number[], period: number = 5): number {
   } catch (error) {
     console.error('Error calculating momentum:', error);
     return 0;
+  }
+}
+
+function findSupportResistance(prices: number[], periods: number = 20): { supports: number[], resistances: number[] } {
+  try {
+    const supports: number[] = [];
+    const resistances: number[] = [];
+    const window = Math.min(periods, Math.floor(prices.length / 3));
+
+    for (let i = window; i < prices.length - window; i++) {
+      const currentPrice = prices[i];
+      const leftPrices = prices.slice(i - window, i);
+      const rightPrices = prices.slice(i + 1, i + window + 1);
+
+      // Check for support
+      if (currentPrice <= Math.min(...leftPrices) && currentPrice <= Math.min(...rightPrices)) {
+        supports.push(currentPrice);
+      }
+
+      // Check for resistance
+      if (currentPrice >= Math.max(...leftPrices) && currentPrice >= Math.max(...rightPrices)) {
+        resistances.push(currentPrice);
+      }
+    }
+
+    // Remove duplicates and sort
+    return {
+      supports: [...new Set(supports)].sort((a, b) => a - b),
+      resistances: [...new Set(resistances)].sort((a, b) => b - a)
+    };
+  } catch (error) {
+    console.error('Error finding support/resistance:', error);
+    return { supports: [], resistances: [] };
   }
 }
 
@@ -135,6 +181,11 @@ export async function calculateIndicators(prices: number[]): Promise<TechnicalIn
       Promise.resolve(calculateATR(prices))
     ]);
 
+    // Calculate additional indicators
+    const momentum = calculateMomentum(prices);
+    const volume = prices.length > 1 ? Math.abs(prices[prices.length - 1] - prices[prices.length - 2]) : 0;
+    const trendStrength = Math.abs(momentum);
+
     // Validate results
     if (!rsi.length || !macd.length || !bollinger.length || !ema.length) {
       console.error('Error: Failed to calculate one or more indicators');
@@ -146,7 +197,10 @@ export async function calculateIndicators(prices: number[]): Promise<TechnicalIn
       macd: macd[macd.length - 1],
       bollinger: bollinger[bollinger.length - 1],
       ema: ema[ema.length - 1],
-      atr
+      atr,
+      volume,
+      momentum,
+      trendStrength
     };
   } catch (error) {
     console.error('Error calculating technical indicators:', error);
@@ -178,6 +232,9 @@ export function calculateRiskLevels(
     const riskAmount = currentPrice - stopLoss;
     const takeProfitRatio = volatility > 5 ? 3 : volatility > 3 ? 2.5 : 2;
     const takeProfit = currentPrice + (riskAmount * takeProfitRatio);
+
+    // Calculate maximum drawdown
+    const maxDrawdown = (currentPrice - stopLoss) / currentPrice * 100;
 
     // Enhanced risk level calculation
     let riskScore = 0;
@@ -218,11 +275,35 @@ export function calculateRiskLevels(
        (indicators.atr / currentPrice)) / 2
     ));
 
+    // Generate trading recommendation
+    let recommendation = {
+      action: 'hold' as const,
+      confidence: 0,
+      reason: ''
+    };
+
+    if (indicators.rsi < 30 && currentPrice < indicators.bollinger.lower && indicators.momentum > 0) {
+      recommendation = {
+        action: 'buy',
+        confidence: 0.8,
+        reason: 'Oversold conditions with positive momentum'
+      };
+    } else if (indicators.rsi > 70 && currentPrice > indicators.bollinger.upper && indicators.momentum < 0) {
+      recommendation = {
+        action: 'sell',
+        confidence: 0.8,
+        reason: 'Overbought conditions with negative momentum'
+      };
+    }
+
     return {
       stopLoss,
       takeProfit,
       riskLevel,
-      riskRatio
+      riskRatio,
+      maxDrawdown,
+      volatility,
+      recommendation
     };
   } catch (error) {
     console.error('Error calculating risk levels:', error.message);
@@ -231,7 +312,14 @@ export function calculateRiskLevels(
       stopLoss: currentPrice * 0.95,
       takeProfit: currentPrice * 1.1,
       riskLevel: 'high',
-      riskRatio: 1
+      riskRatio: 1,
+      maxDrawdown: 5,
+      volatility: 0,
+      recommendation: {
+        action: 'hold',
+        confidence: 0,
+        reason: 'Error calculating risk levels'
+      }
     };
   }
 }
@@ -255,6 +343,17 @@ async function createPriceModel(): Promise<tf.LayersModel> {
   }));
   
   model.add(tf.layers.dropout({ rate: 0.1 }));
+  
+  // Dense layers for better feature extraction
+  model.add(tf.layers.dense({
+    units: 20,
+    activation: 'relu'
+  }));
+  
+  model.add(tf.layers.dense({
+    units: 10,
+    activation: 'relu'
+  }));
   
   // Output layer
   model.add(tf.layers.dense({ units: 1 }));
@@ -331,8 +430,11 @@ export async function predictNextPrice(prices: number[]): Promise<PricePredictio
     const ema5 = calculateEMA(prices.slice(-10), 5);
     const ema20 = calculateEMA(prices.slice(-25), 20);
 
-    // Calculate momentum using last 5 periods
-    const momentum = calculateMomentum(prices);
+    // Calculate momentum using last 10 periods
+    const momentum = calculateMomentum(prices, 10);
+
+    // Find support and resistance levels
+    const { supports, resistances } = findSupportResistance(prices);
 
     // Calculate ATR for volatility assessment
     const atr = calculateATR(prices);
@@ -348,29 +450,39 @@ export async function predictNextPrice(prices: number[]): Promise<PricePredictio
       const prediction = await predictionTensor.data();
       const nextPrice = prediction[0];
 
-      // Calculate confidence based on ATR and momentum
+      // Calculate confidence based on multiple factors
       const priceVolatility = atr / prices[prices.length - 1];
       const momentumStrength = Math.abs(momentum);
+      const trendConsistency = ema5[ema5.length - 1] > ema20[ema20.length - 1] ? 1 : -1;
+      
       const confidence = Math.max(0.1, Math.min(0.9,
-        (1 - priceVolatility) * (0.7 + 0.3 * momentumStrength)
+        (1 - priceVolatility) * // Lower volatility = higher confidence
+        (0.6 + 0.4 * momentumStrength) * // Strong momentum = higher confidence
+        (0.7 + 0.3 * Math.abs(trendConsistency)) // Consistent trend = higher confidence
       ));
 
-      // Enhanced trend detection using EMAs and momentum
+      // Enhanced trend detection
       const currentPrice = prices[prices.length - 1];
       const priceChange = (nextPrice - currentPrice) / currentPrice;
       
       let trend = TRENDS.NEUTRAL;
+      let timeframe: PricePrediction['timeframe'] = '1h';
       
       if (priceChange > 0.01 && momentum > 0 && ema5[ema5.length - 1] > ema20[ema20.length - 1]) {
         trend = TRENDS.UP;
+        timeframe = Math.abs(priceChange) > 0.05 ? '1d' : Math.abs(priceChange) > 0.02 ? '4h' : '1h';
       } else if (priceChange < -0.01 && momentum < 0 && ema5[ema5.length - 1] < ema20[ema20.length - 1]) {
         trend = TRENDS.DOWN;
+        timeframe = Math.abs(priceChange) > 0.05 ? '1d' : Math.abs(priceChange) > 0.02 ? '4h' : '1h';
       }
 
       return {
         nextPrice,
         confidence,
-        trend
+        trend,
+        supportLevels: supports.slice(0, 3), // Top 3 support levels
+        resistanceLevels: resistances.slice(0, 3), // Top 3 resistance levels
+        timeframe
       };
     } finally {
       // Clean up tensors
